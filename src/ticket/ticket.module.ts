@@ -14,7 +14,6 @@ import process from 'node:process';
         transport: Transport.RMQ,
         options: {
           urls: [process.env.RABBITMQ_URL!],
-          queue: 'COMMAND_REPAIR',
           queueOptions: { durable: true },
           exchange: 'REPAIR_TRANSACTION',
           exchangeType: 'topic',
