@@ -1,18 +1,26 @@
-// src/main.ts
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
-import { Logger, ValidationPipe } from '@nestjs/common';
+import { ValidationPipe } from '@nestjs/common';
 import cookieParser from 'cookie-parser';
 import { SuspendedUserFilter } from './utils/suspendExecption';
+import { Transport, MicroserviceOptions } from '@nestjs/microservices';
+import * as process from 'node:process';
+import { Logger } from '@nestjs/common';
 
 const logger = new Logger('Bootstrap');
-
 async function bootstrap(): Promise<void> {
+  // 1. HTTP App
   const app = await NestFactory.create(AppModule);
 
-  // Global middleware & filters
+  // Middleware & global setup
   app.useGlobalFilters(new SuspendedUserFilter());
   app.use(cookieParser());
+  app.enableCors({
+    origin: 'https://task-manager-fe-lyart.vercel.app',
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true,
+  });
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,
@@ -21,22 +29,28 @@ async function bootstrap(): Promise<void> {
     }),
   );
 
-  // CORS untuk FE Vercel (termasuk preview *.vercel.app)
-  app.enableCors({
-    origin: ['https://task-manager-fe-lyart.vercel.app', /\.vercel\.app$/],
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    credentials: true,
+  // Microservice RMQ listener
+  app.connectMicroservice<MicroserviceOptions>({
+    transport: Transport.RMQ,
+    options: {
+      urls: [process.env.RABBITMQ_URL!],
+      queue: 'STATUS_REPAIR',
+      queueOptions: {
+        durable: true,
+        arguments: { 'x-queue-type': 'quorum' },
+      },
+    },
   });
 
-  // ⛔️ Jangan connect RMQ di Web Service (itu tugas worker.ts)
-  // Kalau suatu saat mau toggle pakai ENV, boleh:
-  // if (process.env.ENABLE_RMQ === '1') { ...connectMicroservice... }
-
-  const port = Number(process.env.PORT) || 5000;
+  await app.startAllMicroservices();
+  const port = process.env.PORT || 5000;
   await app.listen(port, '0.0.0.0');
 
+  // HTTP Server
   logger.log(`✅ HTTP server running on port ${port}`);
+
+  // RMQ Microservice
+  logger.log(`🎧 RMQ microservice listening...`);
 }
 
 bootstrap();
