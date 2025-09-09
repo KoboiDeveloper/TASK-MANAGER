@@ -16,6 +16,13 @@ import process from 'node:process';
           urls: [process.env.RABBITMQ_URL!],
           exchange: 'REPAIR_TRANSACTION',
           exchangeType: 'topic',
+          persistent: true,
+          wildcards: true,
+          queue: 'STATUS_REPAIR',
+          queueOptions: {
+            durable: true,
+            arguments: { 'x-queue-type': 'quorum' },
+          },
         },
       },
     ]),
