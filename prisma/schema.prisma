@@ -1,0 +1,129 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlserver"
+  url      = env("DATABASE_URL")
+}
+
+model DT_USER {
+  nik             String                @id @db.Char(9)
+  nama            String                @db.VarChar(40)
+  password        String                @db.VarChar(100)
+  noTelp          String                @db.VarChar(13)
+  email           String                @db.VarChar(30)
+  roleId          String                @db.VarChar(20)
+  statusActive    Boolean
+  accessRegionIds DT_ACCESS_REGION[]
+  accessStoreIds  DT_ACCESS_STORE[]
+  role            DT_ROLE               @relation(fields: [roleId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  forgotPasswords LOG_FORGOT_PASSWORD[]
+
+  ticketsHandled     DT_TICKET[] @relation("TicketHandler")
+  ticketsCompletedBy DT_TICKET[] @relation("TicketCompletedBy") // relasi balik
+}
+
+model DT_ACCESS_REGION {
+  id       String    @id @default(uuid()) @db.UniqueIdentifier
+  userNik  String    @db.Char(9)
+  regionId String    @db.VarChar(20) // ✅ sama persis dengan DT_REGION.id
+  region   DT_REGION @relation(fields: [regionId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  user     DT_USER   @relation(fields: [userNik], references: [nik], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([userNik, regionId])
+  @@index([userNik])
+  @@index([regionId])
+}
+
+model DT_ACCESS_STORE {
+  id      String   @id @default(uuid()) @db.UniqueIdentifier
+  userNik String   @db.Char(9)
+  storeId String   @db.VarChar(10) // ✅ sama persis dengan DT_STORE.id
+  store   DT_STORE @relation(fields: [storeId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  user    DT_USER  @relation(fields: [userNik], references: [nik], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([userNik, storeId])
+  @@index([userNik])
+  @@index([storeId])
+}
+
+model DT_REGION {
+  id     String             @id @db.VarChar(20)
+  region String             @db.VarChar(30)
+  access DT_ACCESS_REGION[]
+  stores DT_STORE[]
+}
+
+model DT_STORE {
+  id           String            @id @db.VarChar(10)
+  brand        String            @db.VarChar(30)
+  address      String?           @db.VarChar(100)
+  statusActive Boolean
+  regionId     String            @db.VarChar(20) // ✅ samakan dengan DT_REGION.id
+  users        DT_ACCESS_STORE[]
+  region       DT_REGION         @relation(fields: [regionId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([statusActive])
+  @@index([regionId])
+}
+
+model DT_ROLE {
+  id    String    @id @db.VarChar(20)
+  nama  String    @db.VarChar(20)
+  users DT_USER[]
+}
+
+model DT_TICKET {
+  id         String  @id @db.VarChar(20)
+  handlerNik String  @db.Char(9)
+  handler    DT_USER @relation("TicketHandler", fields: [handlerNik], references: [nik], onDelete: NoAction, onUpdate: NoAction)
+
+  idStore     String @db.VarChar(20)
+  noTelp      String @db.VarChar(15)
+  category    String @db.VarChar(20)
+  status      String @db.VarChar(15)
+  description String @db.VarChar(255)
+
+  fromPayment     String? @db.VarChar(20)
+  toPayment       String? @db.VarChar(20)
+  isDirectSelling Boolean @default(false)
+  billCode        String? @db.VarChar(20)
+  grandTotal      String? @db.VarChar(20)
+
+  images DT_IMAGES[] @relation("TicketImages")
+
+  completedByNik String?  @db.Char(9) // ganti nama field, lebih jelas
+  completedBy    DT_USER? @relation("TicketCompletedBy", fields: [completedByNik], references: [nik], onDelete: NoAction, onUpdate: NoAction)
+
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([handlerNik])
+  @@index([completedByNik])
+  @@index([category])
+  @@index([status])
+}
+
+model DT_IMAGES {
+  id       String @id @default(uuid()) @db.UniqueIdentifier
+  url      String @db.VarChar(255)
+  filename String @db.VarChar(20)
+  mimeType String @db.VarChar(20)
+  bytes    Int
+
+  ticketId String?    @db.VarChar(20)
+  ticket   DT_TICKET? @relation("TicketImages", fields: [ticketId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+
+  @@index([ticketId])
+}
+
+model LOG_FORGOT_PASSWORD {
+  otp       String   @id @db.Char(6)
+  nik       String   @db.Char(9)
+  used      Boolean  @default(false)
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+  user      DT_USER  @relation(fields: [nik], references: [nik], onDelete: Cascade, onUpdate: NoAction)
+}

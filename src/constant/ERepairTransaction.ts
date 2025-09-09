@@ -1,0 +1,4 @@
+export enum ERepairTransaction {
+  REPAIR_PAYMENT = 'REPAIR_PAYMENT',
+  DELETE_PAYMENT = 'DELETE_PAYMENT',
+}

@@ -1,0 +1,6 @@
+export enum EStatus {
+  QUEUED = 'QUEUED',
+  ONPROCESS = 'ONPROCESS',
+  COMPLETED = 'COMPLETED',
+  FAILED = 'FAILED',
+}
