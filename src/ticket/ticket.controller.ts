@@ -81,7 +81,7 @@ export class TicketController {
 
   @UseGuards(AuthGuard)
   @Roles('SUPER')
-  @Post('complite')
+  @Post('complete')
   async compliteTicket(@Body() body: { ticketId: string }, @Req() request: Request) {
     const user = request['user'] as DT_USER;
     const { nik } = user;
