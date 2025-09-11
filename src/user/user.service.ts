@@ -9,11 +9,13 @@ import { RegisterResponse } from '../auth/dto/response/registerResponse';
 import { encodePassword } from '../utils/bcrypt';
 import { RequestUpdateUser } from './dto/request/requestUpdateUser';
 import { ConfigService } from '@nestjs/config';
+import { ResponseListUsersDto } from './dto/response-users.dto';
 
 interface IuserService {
   create(data: RegisterRequest): Promise<RegisterResponse>;
   updateUser(nik: string, data: RequestUpdateUser): Promise<void>;
-  findAll(): Promise<DT_USER[]>;
+  findAll(): Promise<ResponseListUsersDto[]>;
+  findSuper(): Promise<ResponseListUsersDto[]>;
   isActive(nik: string): Promise<boolean>;
   resetPassword(nik: string): Promise<void>;
   findOne(nik: string): Promise<DT_USER>;
@@ -30,9 +32,15 @@ export class UserService implements IuserService {
     private readonly configService: ConfigService,
   ) {}
 
-  async findAll(): Promise<DT_USER[]> {
+  async findAll(): Promise<ResponseListUsersDto[]> {
     return await this.prismaService.dT_USER.findMany({
-      include: {
+      select: {
+        nik: true,
+        nama: true,
+        noTelp: true,
+        email: true,
+        roleId: true,
+        statusActive: true,
         accessStoreIds: {
           select: {
             storeId: true,
@@ -46,7 +54,29 @@ export class UserService implements IuserService {
       },
     });
   }
-
+  async findSuper(): Promise<ResponseListUsersDto[]> {
+    return await this.prismaService.dT_USER.findMany({
+      where: { roleId: 'SUPER' },
+      select: {
+        nik: true,
+        nama: true,
+        noTelp: true,
+        email: true,
+        roleId: true,
+        statusActive: true,
+        accessStoreIds: {
+          select: {
+            storeId: true,
+          },
+        },
+        accessRegionIds: {
+          select: {
+            regionId: true,
+          },
+        },
+      },
+    });
+  }
   async create(data: RegisterRequest): Promise<RegisterResponse> {
     const existingUser = await this.prismaService.dT_USER.findUnique({
       where: { nik: data.nik },

@@ -44,6 +44,18 @@ export class TicketController {
     }
   }
 
+  @UseGuards(AuthGuard)
+  @Roles('SUPER')
+  @Get('/:nik')
+  async getTicketByUser() {
+    try {
+      const data = await this.ticketService.getTickets();
+      return new CommonResponse('Ticket List', HttpStatus.OK, data);
+    } catch (e) {
+      return handleException((e as Error).message);
+    }
+  }
+
   @Post()
   @UseInterceptors(FilesInterceptor('files', 20, { storage: multer.memoryStorage() }))
   async createTicket(

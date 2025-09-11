@@ -12,11 +12,11 @@ import {
 import { UserService } from './user.service';
 import { CommonResponse } from '../common/commonResponse';
 import { handleException } from '../utils/handleException';
-import { DT_USER } from '@prisma/client';
 import { AuthGuard } from '../security/authGuard';
 import { Roles } from '../security/roles.decorator';
 import { RegisterRequest } from './dto/request/registerRequest';
 import { RequestUpdateUser } from './dto/request/requestUpdateUser';
+import { ResponseListUsersDto } from './dto/response-users.dto';
 
 @UseGuards(AuthGuard)
 @Controller('api/users')
@@ -26,12 +26,24 @@ export class UserController {
   @Get()
   async findAll() {
     try {
-      const userResponse: DT_USER[] = await this.userService.findAll();
+      const userResponse: ResponseListUsersDto[] = await this.userService.findAll();
       return new CommonResponse('Users List', HttpStatus.OK, userResponse);
     } catch ({ message }) {
       return handleException(message as string);
     }
   }
+
+  @Roles('SUPER')
+  @Get('/super')
+  async findSuperUser() {
+    try {
+      const userResponse: ResponseListUsersDto[] = await this.userService.findSuper();
+      return new CommonResponse('User Super List', HttpStatus.OK, userResponse);
+    } catch ({ message }) {
+      return handleException(message as string);
+    }
+  }
+
   @Roles('SUPER')
   @Post('/add')
   @HttpCode(HttpStatus.CREATED)
