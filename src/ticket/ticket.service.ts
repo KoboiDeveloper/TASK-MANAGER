@@ -255,7 +255,6 @@ export class TicketService {
     return ticket;
   }
   async getTicketByStoreId(idStore: string): Promise<TicketListResponseDto[]> {
-    await this.ensureTicket(idStore);
     return this.prismaService.dT_TICKET.findMany({
       where: { idStore },
       select: {
