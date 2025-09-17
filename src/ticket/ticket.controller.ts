@@ -26,6 +26,7 @@ import { RequestRepairTransactionDto } from './dto/request/requestTicketCommand'
 import { EventPattern, Payload } from '@nestjs/microservices';
 import { ResponseTicketCommand } from './dto/response/responseTicketCommand';
 import multer from 'multer';
+import { UserTicketSummaryDto } from './dto/response/responseTIcket.dto';
 
 @Controller('api/tickets')
 export class TicketController {
@@ -45,11 +46,23 @@ export class TicketController {
   }
 
   @UseGuards(AuthGuard)
-  @Roles('SUPER')
-  @Get('/:nik')
-  async getTicketByUser() {
+  @Roles('SUPER', 'ADMIN')
+  @Get('/summary')
+  async getTicketsSummaryByNik() {
     try {
-      const data = await this.ticketService.getTickets();
+      const data: UserTicketSummaryDto[] = await this.ticketService.getSummaryByUser();
+      return new CommonResponse('Summary List By User', HttpStatus.OK, data);
+    } catch (e) {
+      return handleException((e as Error).message);
+    }
+  }
+
+  @UseGuards(AuthGuard)
+  @Roles('SUPER', 'ADMIN')
+  @Get('/:nik')
+  async getTicketByUser(@Param('nik') nik: string) {
+    try {
+      const data = await this.ticketService.getTicketByNik(nik);
       return new CommonResponse('Ticket List', HttpStatus.OK, data);
     } catch (e) {
       return handleException((e as Error).message);
@@ -92,7 +105,7 @@ export class TicketController {
   }
 
   @UseGuards(AuthGuard)
-  @Roles('SUPER')
+  @Roles('SUPER', 'ADMIN')
   @Post('complete')
   async compliteTicket(@Body() body: { ticketId: string }, @Req() request: Request) {
     const user = request['user'] as DT_USER;
@@ -106,7 +119,7 @@ export class TicketController {
   }
 
   @UseGuards(AuthGuard)
-  @Roles('SUPER')
+  @Roles('SUPER', 'ADMIN')
   @Post('repair-transaction')
   async repairTransaction(@Body() data: RequestRepairTransactionDto, @Req() request: Request) {
     const user = request['user'] as DT_USER;

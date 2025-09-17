@@ -9,13 +9,15 @@ import { RequestRepairTransactionDto } from './dto/request/requestTicketCommand'
 import { ClientProxy } from '@nestjs/microservices';
 import { EStatus } from '../constant/EStatus';
 import { ResponseTicketCommand } from './dto/response/responseTicketCommand';
-import { TicketListResponseDto } from './dto/response/responseTIcket.dto';
+import { TicketListResponseDto, UserTicketSummaryDto } from './dto/response/responseTIcket.dto';
+import { UserService } from '../user/user.service';
 
 @Injectable()
 export class TicketService {
   private readonly logger = new Logger(TicketService.name);
   constructor(
     private readonly prismaService: PrismaService,
+    private readonly userService: UserService,
     @Inject('STORE_CLIENT') private readonly client: ClientProxy,
   ) {}
 
@@ -214,6 +216,126 @@ export class TicketService {
     });
   }
 
+  async getSummaryByUser(opts?: { start?: Date; end?: Date }): Promise<UserTicketSummaryDto[]> {
+    const admins = await this.userService.findAdmin();
+    const niks = admins.map((s) => s.nik).filter(Boolean);
+    if (niks.length === 0) return [];
+
+    // Filter opsional (tanggal) supaya bisa dipakai per-periode
+    const dateFilter =
+      opts?.start || opts?.end
+        ? {
+            AND: [
+              opts?.start ? { updatedAt: { gte: opts.start } } : {},
+              opts?.end ? { updatedAt: { lt: opts.end } } : {},
+            ],
+          }
+        : {};
+
+    // 1) totalAll per handlerNik
+    const totalAll = await this.prismaService.dT_TICKET.groupBy({
+      by: ['handlerNik'],
+      where: {
+        handlerNik: { in: niks },
+        ...dateFilter,
+      },
+      _count: { _all: true },
+    });
+
+    // 2) totalCompleted per handlerNik
+    const totalCompleted = await this.prismaService.dT_TICKET.groupBy({
+      by: ['handlerNik'],
+      where: {
+        handlerNik: { in: niks },
+        status: EStatus.COMPLETED, // status string: 'COMPLETED'
+        ...dateFilter,
+      },
+      _count: { _all: true },
+    });
+
+    // Build map untuk lookup cepat
+    const mapAll = new Map<string, number>();
+    for (const row of totalAll) mapAll.set(row.handlerNik, row._count._all);
+
+    const mapCompleted = new Map<string, number>();
+    for (const row of totalCompleted) mapCompleted.set(row.handlerNik, row._count._all);
+
+    // Merge ke list ADMIN; user tanpa tiket tetap muncul (0)
+    const result: UserTicketSummaryDto[] = admins.map((s) => {
+      const all = mapAll.get(s.nik) ?? 0;
+      const done = mapCompleted.get(s.nik) ?? 0;
+      return {
+        nik: s.nik,
+        name: s.nama,
+        totalAll: all,
+        uncompleted: Math.max(0, all - done),
+      };
+    });
+
+    // (Opsional) urutkan yang paling banyak uncompleted dulu untuk UX tab/badge
+    result.sort((a, b) => b.uncompleted - a.uncompleted);
+
+    return result;
+  }
+
+  async getTicketByStoreId(idStore: string): Promise<TicketListResponseDto[]> {
+    return this.prismaService.dT_TICKET.findMany({
+      where: { idStore },
+      select: {
+        id: true,
+        idStore: true,
+        noTelp: true,
+        category: true,
+        status: true,
+        description: true,
+        fromPayment: true,
+        toPayment: true,
+        isDirectSelling: true,
+        billCode: true,
+        grandTotal: true,
+        completedBy: { select: { nama: true } },
+        completedAt: true,
+        createdAt: true,
+        handler: { select: { nama: true } },
+        images: {
+          select: {
+            id: true,
+            url: true,
+          },
+        },
+      },
+    });
+  }
+
+  async getTicketByNik(handlerNik: string): Promise<TicketListResponseDto[]> {
+    return this.prismaService.dT_TICKET.findMany({
+      where: { handlerNik },
+      select: {
+        id: true,
+        idStore: true,
+        noTelp: true,
+        category: true,
+        status: true,
+        description: true,
+        fromPayment: true,
+        toPayment: true,
+        isDirectSelling: true,
+        billCode: true,
+        grandTotal: true,
+        completedBy: { select: { nama: true } },
+        completedAt: true,
+        createdAt: true,
+        handler: { select: { nama: true } },
+        images: {
+          select: {
+            id: true,
+            url: true,
+          },
+        },
+      },
+    });
+  }
+
   async repairtPayment(data: RequestRepairTransactionDto): Promise<string> {
     const routingKey = `STORE.${data.idStore}.COMMAND`;
     this.client.emit<RequestRepairTransactionDto>(routingKey, data);
@@ -253,34 +375,6 @@ export class TicketService {
 
     this.logger.log(`✅ Ticket ${data.ticketId} updated to ${data.status}`);
     return ticket;
-  }
-  async getTicketByStoreId(idStore: string): Promise<TicketListResponseDto[]> {
-    return this.prismaService.dT_TICKET.findMany({
-      where: { idStore },
-      select: {
-        id: true,
-        idStore: true,
-        noTelp: true,
-        category: true,
-        status: true,
-        description: true,
-        fromPayment: true,
-        toPayment: true,
-        isDirectSelling: true,
-        billCode: true,
-        grandTotal: true,
-        completedBy: { select: { nama: true } },
-        completedAt: true,
-        createdAt: true,
-        handler: { select: { nama: true } },
-        images: {
-          select: {
-            id: true,
-            url: true,
-          },
-        },
-      },
-    });
   }
 
   async completeTicket(ticketId: string, nik: string): Promise<string> {

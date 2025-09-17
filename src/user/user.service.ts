@@ -15,7 +15,7 @@ interface IuserService {
   create(data: RegisterRequest): Promise<RegisterResponse>;
   updateUser(nik: string, data: RequestUpdateUser): Promise<void>;
   findAll(): Promise<ResponseListUsersDto[]>;
-  findSuper(): Promise<ResponseListUsersDto[]>;
+  findAdmin(): Promise<{ nik: string; nama: string }[]>;
   isActive(nik: string): Promise<boolean>;
   resetPassword(nik: string): Promise<void>;
   findOne(nik: string): Promise<DT_USER>;
@@ -54,26 +54,12 @@ export class UserService implements IuserService {
       },
     });
   }
-  async findSuper(): Promise<ResponseListUsersDto[]> {
+  async findAdmin(): Promise<{ nik: string; nama: string }[]> {
     return await this.prismaService.dT_USER.findMany({
-      where: { roleId: 'SUPER' },
+      where: { roleId: 'ADMIN' },
       select: {
         nik: true,
         nama: true,
-        noTelp: true,
-        email: true,
-        roleId: true,
-        statusActive: true,
-        accessStoreIds: {
-          select: {
-            storeId: true,
-          },
-        },
-        accessRegionIds: {
-          select: {
-            regionId: true,
-          },
-        },
       },
     });
   }

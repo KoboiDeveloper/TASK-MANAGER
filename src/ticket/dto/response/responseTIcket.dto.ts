@@ -37,3 +37,10 @@ export class TicketListResponseDto {
 
   images: ImageDto[];
 }
+
+export type UserTicketSummaryDto = {
+  nik: string;
+  name: string;
+  uncompleted: number;
+  totalAll: number;
+};

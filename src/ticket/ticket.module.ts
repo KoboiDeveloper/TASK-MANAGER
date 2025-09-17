@@ -8,6 +8,7 @@ import { ClientsModule, Transport } from '@nestjs/microservices';
 import process from 'node:process';
 @Module({
   imports: [
+    UserModule,
     ClientsModule.register([
       {
         name: 'STORE_CLIENT',

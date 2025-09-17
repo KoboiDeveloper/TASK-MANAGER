@@ -34,17 +34,6 @@ export class UserController {
   }
 
   @Roles('SUPER')
-  @Get('/super')
-  async findSuperUser() {
-    try {
-      const userResponse: ResponseListUsersDto[] = await this.userService.findSuper();
-      return new CommonResponse('User Super List', HttpStatus.OK, userResponse);
-    } catch ({ message }) {
-      return handleException(message as string);
-    }
-  }
-
-  @Roles('SUPER')
   @Post('/add')
   @HttpCode(HttpStatus.CREATED)
   async register(@Body() request: RegisterRequest) {

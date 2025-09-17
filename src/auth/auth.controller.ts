@@ -69,8 +69,8 @@ export class AuthController {
   @Get('user-info')
   getUserInfo(@Req() request: Request) {
     const user = request['user'] as DT_USER;
-    const { nik, nama } = user;
-    return new CommonResponse('Welcome', HttpStatus.OK, { nik, nama });
+    const { nik, nama, roleId } = user;
+    return new CommonResponse('Welcome', HttpStatus.OK, { nik, nama, roleId });
   }
 
   @Post('forgot-password')
