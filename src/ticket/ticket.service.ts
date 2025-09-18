@@ -23,7 +23,7 @@ export class TicketService {
 
   private async pickNextSuperAdminNik(): Promise<string> {
     const superAdmins = await this.prismaService.dT_USER.findMany({
-      where: { roleId: 'SUPER' }, // pastikan kolom "role" ada di DT_USER
+      where: { roleId: 'ADMIN' },
       select: { nik: true },
     });
     if (!superAdmins.length) {
