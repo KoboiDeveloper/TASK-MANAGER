@@ -46,7 +46,7 @@ export class TicketController {
   }
 
   @UseGuards(AuthGuard)
-  @Roles('SUPER', 'ADMIN')
+  @Roles('SUPER','ADMIN')
   @Get('/summary')
   async getTicketsSummaryByNik() {
     try {
