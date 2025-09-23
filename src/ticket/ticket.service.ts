@@ -203,6 +203,7 @@ export class TicketService {
         createdAt: true,
         handler: {
           select: {
+            nik: true,
             nama: true,
           },
         },
@@ -214,6 +215,19 @@ export class TicketService {
         },
       },
     });
+  }
+
+  async reassignTicket(ticketId: string, nik: string): Promise<string> {
+    await this.prismaService.dT_TICKET.update({
+      where: {
+        id: ticketId,
+      },
+      data: {
+        handlerNik: nik,
+      },
+    });
+
+    return 'Ticket successfully reassigned';
   }
 
   async getSummaryByUser(opts?: { start?: Date; end?: Date }): Promise<UserTicketSummaryDto[]> {
@@ -296,7 +310,7 @@ export class TicketService {
         completedBy: { select: { nama: true } },
         completedAt: true,
         createdAt: true,
-        handler: { select: { nama: true } },
+        handler: { select: { nik: true, nama: true } },
         images: {
           select: {
             id: true,
@@ -325,7 +339,7 @@ export class TicketService {
         completedBy: { select: { nama: true } },
         completedAt: true,
         createdAt: true,
-        handler: { select: { nama: true } },
+        handler: { select: { nik: true, nama: true } },
         images: {
           select: {
             id: true,

@@ -9,7 +9,7 @@ export class TicketListResponseDto {
 
   idStore: string;
 
-  handler: { nama: string | null } | null;
+  handler: { nik: string | null; nama: string | null } | null;
 
   noTelp: string;
 

@@ -132,4 +132,16 @@ export class TicketController {
       return handleException((e as Error).message);
     }
   }
+
+  @UseGuards(AuthGuard)
+  @Roles('SUPER')
+  @Post('reassign-ticket')
+  async reassaignTicket(@Body() body: { ticketId: string; nik: string }) {
+    try {
+      const res: string = await this.ticketService.reassignTicket(body.ticketId, body.nik);
+      return new CommonResponse('Ticket Reassigned', HttpStatus.OK, res);
+    } catch (e) {
+      return handleException((e as Error).message);
+    }
+  }
 }
