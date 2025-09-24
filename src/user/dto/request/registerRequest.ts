@@ -67,6 +67,10 @@ export class RegisterRequest {
   @IsBoolean()
   statusActive: boolean;
 
+  @IsNotEmpty({ message: 'Handle Web tidak boleh kosong' })
+  @IsBoolean()
+  handleWeb: boolean;
+
   @IsNotEmpty({ message: 'Role tidak boleh kosong' })
   @IsEnum(ERole, { message: 'Role tidak valid' })
   roleId: ERole;

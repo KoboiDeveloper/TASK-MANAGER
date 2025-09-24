@@ -14,6 +14,7 @@ model DT_USER {
   noTelp          String                @db.VarChar(13)
   email           String                @db.VarChar(30)
   roleId          String                @db.VarChar(20)
+  handleWeb       Boolean               @default(false)
   statusActive    Boolean
   accessRegionIds DT_ACCESS_REGION[]
   accessStoreIds  DT_ACCESS_STORE[]

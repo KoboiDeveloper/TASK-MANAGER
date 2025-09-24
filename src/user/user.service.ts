@@ -41,6 +41,7 @@ export class UserService implements IuserService {
         email: true,
         roleId: true,
         statusActive: true,
+        handleWeb: true,
         accessStoreIds: {
           select: {
             storeId: true,
@@ -56,7 +57,11 @@ export class UserService implements IuserService {
   }
   async findAdmin(): Promise<{ nik: string; nama: string }[]> {
     return await this.prismaService.dT_USER.findMany({
-      where: { roleId: 'ADMIN' },
+      where: {
+        roleId: {
+          in: ['ADMIN', 'SUPER'],
+        },
+      },
       select: {
         nik: true,
         nama: true,
@@ -89,6 +94,7 @@ export class UserService implements IuserService {
           email: data.email,
           roleId: getRole.id,
           statusActive: data.statusActive,
+          handleWeb: data.handleWeb,
         },
       });
 
@@ -142,6 +148,7 @@ export class UserService implements IuserService {
           email: data.email,
           roleId: getRole.id,
           statusActive: data.statusActive,
+          handleWeb: data.handleWeb,
         },
       });
 

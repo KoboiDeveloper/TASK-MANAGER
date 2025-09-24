@@ -21,28 +21,45 @@ export class TicketService {
     @Inject('STORE_CLIENT') private readonly client: ClientProxy,
   ) {}
 
-  private async pickNextSuperAdminNik(): Promise<string> {
-    const superAdmins = await this.prismaService.dT_USER.findMany({
-      where: { roleId: 'ADMIN' },
-      select: { nik: true },
-    });
-    if (!superAdmins.length) {
-      throw new BadRequestException(
-        'Tidak ada user dengan role SUPER_ADMIN untuk assign handlerNik.',
-      );
+  private async pickNextAdminNik(category: string): Promise<string> {
+    let users: Array<{ nik: string }> = [];
+    const normalized = category.toLowerCase().replace(/\s+/g, '');
+    if (normalized === 'kaskecil' || category === 'webother') {
+      users = await this.prismaService.dT_USER.findMany({
+        where: {
+          handleWeb: true,
+          statusActive: true,
+        },
+        select: { nik: true },
+        orderBy: { nik: 'asc' },
+      });
+    } else {
+      users = await this.prismaService.dT_USER.findMany({
+        where: {
+          roleId: { in: ['ADMIN'] },
+          statusActive: true,
+        },
+        select: { nik: true },
+        orderBy: { nik: 'asc' },
+      });
     }
 
-    // Urutkan agar deterministik
-    const handlerNiks = superAdmins.map((u) => u.nik).sort();
+    if (!users.length) {
+      throw new BadRequestException('Tidak ada user untuk assign handlerNik.');
+    }
 
-    // Cari tiket terakhir yang diassign ke salah satu SUPER_ADMIN → ambil "next"
+    const handlerNiks = Array.from(new Set(users.map((u) => u.nik)));
+
     const last = await this.prismaService.dT_TICKET.findFirst({
       where: { handlerNik: { in: handlerNiks } },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       select: { handlerNik: true },
     });
 
-    if (!last?.handlerNik) return handlerNiks[0];
+    if (!last?.handlerNik) {
+      return handlerNiks[0];
+    }
+
     const idx = handlerNiks.indexOf(last.handlerNik);
     const nextIdx = idx >= 0 ? (idx + 1) % handlerNiks.length : 0;
     return handlerNiks[nextIdx];
@@ -134,7 +151,7 @@ export class TicketService {
 
   //core
   async createTicket(data: CreateTicketDto, files?: Express.Multer.File[]): Promise<string> {
-    const handlerNik = await this.pickNextSuperAdminNik();
+    const handlerNik = await this.pickNextAdminNik(data.category);
     const id = await this.generateTicketId();
 
     const {
@@ -230,28 +247,16 @@ export class TicketService {
     return 'Ticket successfully reassigned';
   }
 
-  async getSummaryByUser(opts?: { start?: Date; end?: Date }): Promise<UserTicketSummaryDto[]> {
+  async getSummaryByUser(): Promise<UserTicketSummaryDto[]> {
     const admins = await this.userService.findAdmin();
     const niks = admins.map((s) => s.nik).filter(Boolean);
     if (niks.length === 0) return [];
-
-    // Filter opsional (tanggal) supaya bisa dipakai per-periode
-    const dateFilter =
-      opts?.start || opts?.end
-        ? {
-            AND: [
-              opts?.start ? { updatedAt: { gte: opts.start } } : {},
-              opts?.end ? { updatedAt: { lt: opts.end } } : {},
-            ],
-          }
-        : {};
 
     // 1) totalAll per handlerNik
     const totalAll = await this.prismaService.dT_TICKET.groupBy({
       by: ['handlerNik'],
       where: {
         handlerNik: { in: niks },
-        ...dateFilter,
       },
       _count: { _all: true },
     });
@@ -262,7 +267,6 @@ export class TicketService {
       where: {
         handlerNik: { in: niks },
         status: EStatus.COMPLETED, // status string: 'COMPLETED'
-        ...dateFilter,
       },
       _count: { _all: true },
     });
