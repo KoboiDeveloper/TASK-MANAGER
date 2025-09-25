@@ -1,4 +1,4 @@
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { DT_USER, Prisma } from '@prisma/client';
 import { ERole } from '../constant/ERole';
@@ -6,7 +6,7 @@ import { StoreService } from '../store/store.service';
 import { RoleService } from '../role/role.service';
 import { RegisterRequest } from './dto/request/registerRequest';
 import { RegisterResponse } from '../auth/dto/response/registerResponse';
-import { encodePassword } from '../utils/bcrypt';
+import { comparePassword, encodePassword } from '../utils/bcrypt';
 import { RequestUpdateUser } from './dto/request/requestUpdateUser';
 import { ConfigService } from '@nestjs/config';
 import { ResponseListUsersDto } from './dto/response-users.dto';
@@ -183,6 +183,26 @@ export class UserService implements IuserService {
     const password = encodePassword(defaultPassword);
 
     await this.prismaService.dT_USER.update({ where: { nik }, data: { password } });
+  }
+
+  async changePassword(nik: string, oldPassword: string, newPassword: string): Promise<void> {
+    const user = await this.prismaService.dT_USER.findUnique({ where: { nik } });
+
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    const isMatch = await comparePassword(oldPassword, user.password);
+    if (!isMatch) {
+      throw new BadRequestException('Old password is incorrect');
+    }
+
+    const password = encodePassword(newPassword);
+
+    await this.prismaService.dT_USER.update({
+      where: { nik },
+      data: { password },
+    });
   }
 
   async findOne(nik: string): Promise<DT_USER> {

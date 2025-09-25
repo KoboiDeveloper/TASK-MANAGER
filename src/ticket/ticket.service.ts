@@ -24,7 +24,7 @@ export class TicketService {
   private async pickNextAdminNik(category: string): Promise<string> {
     let users: Array<{ nik: string }> = [];
     const normalized = category.toLowerCase().replace(/\s+/g, '');
-    if (normalized === 'kaskecil' || category === 'webother') {
+    if (normalized === 'kaskecil' || normalized === 'webother') {
       users = await this.prismaService.dT_USER.findMany({
         where: {
           handleWeb: true,
@@ -36,7 +36,7 @@ export class TicketService {
     } else {
       users = await this.prismaService.dT_USER.findMany({
         where: {
-          roleId: { in: ['ADMIN'] },
+          roleId: 'ADMIN',
           statusActive: true,
         },
         select: { nik: true },

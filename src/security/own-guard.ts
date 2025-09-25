@@ -6,6 +6,7 @@ import { Request } from 'express';
 interface RequestWithUser extends Request {
   user: {
     nik: string;
+    roleId?: string[];
     [key: string]: any;
   };
 }
@@ -19,12 +20,16 @@ export class OwnerGuard implements CanActivate {
       context.getHandler(),
       context.getClass(),
     ]);
-
     if (!needOwner) return true;
 
     const request = context.switchToHttp().getRequest<RequestWithUser>();
     const userNik = request.user?.nik;
+    const userRoles = request.user?.roleId || [];
     const paramNik = request.params?.nik;
+
+    if (userRoles.includes('SUPER')) {
+      return true;
+    }
 
     if (!userNik || userNik !== paramNik) {
       throw new ForbiddenException('You are not the owner of this resource');

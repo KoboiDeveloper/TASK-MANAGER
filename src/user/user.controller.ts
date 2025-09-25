@@ -17,6 +17,9 @@ import { Roles } from '../security/roles.decorator';
 import { RegisterRequest } from './dto/request/registerRequest';
 import { RequestUpdateUser } from './dto/request/requestUpdateUser';
 import { ResponseListUsersDto } from './dto/response-users.dto';
+import { Own } from '../security/own.decorator';
+import { ChangePasswordDto } from './dto/request/requestChangePassword';
+import { OwnerGuard } from '../security/own-guard';
 
 @UseGuards(AuthGuard)
 @Controller('api/users')
@@ -66,5 +69,17 @@ export class UserController {
       return handleException(message as string);
     }
   }
-  //change-password blom, males
+
+  @Own()
+  @UseGuards(AuthGuard, OwnerGuard)
+  @Patch('/change-password/:nik')
+  @HttpCode(HttpStatus.OK)
+  async changePassword(@Param('nik') nik: string, @Body() data: ChangePasswordDto) {
+    try {
+      await this.userService.changePassword(nik, data.oldPassword, data.newPassword);
+      return new CommonResponse('Password changed successfully', HttpStatus.OK, null);
+    } catch ({ message }) {
+      return handleException(message as string);
+    }
+  }
 }
