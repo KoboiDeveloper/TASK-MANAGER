@@ -164,6 +164,7 @@ export class TicketService {
       isDirectSelling,
       billCode,
       grandTotal,
+      idtv,
     } = data;
 
     try {
@@ -176,6 +177,7 @@ export class TicketService {
           noTelp,
           category,
           status: EStatus.QUEUED,
+          idtv,
           description,
           fromPayment,
           toPayment,
@@ -202,7 +204,7 @@ export class TicketService {
 
   async getTickets(): Promise<TicketListResponseDto[]> {
     return await this.prismaService.dT_TICKET.findMany({
-      orderBy: { createdAt: 'desc' },
+      orderBy: { createdAt: 'asc' },
       select: {
         id: true,
         idStore: true,
@@ -215,7 +217,9 @@ export class TicketService {
         isDirectSelling: true,
         billCode: true,
         grandTotal: true,
-        completedBy: { select: { nama: true } }, // ✅ sekarang valid
+        completedBy: { select: { nama: true } },
+        idtv: true,
+        reason: true,
         completedAt: true,
         createdAt: true,
         handler: {
@@ -311,6 +315,8 @@ export class TicketService {
         isDirectSelling: true,
         billCode: true,
         grandTotal: true,
+        idtv: true,
+        reason: true,
         completedBy: { select: { nama: true } },
         completedAt: true,
         createdAt: true,
@@ -328,6 +334,7 @@ export class TicketService {
   async getTicketByNik(handlerNik: string): Promise<TicketListResponseDto[]> {
     return this.prismaService.dT_TICKET.findMany({
       where: { handlerNik },
+      orderBy: { createdAt: 'asc' },
       select: {
         id: true,
         idStore: true,
@@ -339,6 +346,8 @@ export class TicketService {
         toPayment: true,
         isDirectSelling: true,
         billCode: true,
+        idtv: true,
+        reason: true,
         grandTotal: true,
         completedBy: { select: { nama: true } },
         completedAt: true,
@@ -416,6 +425,7 @@ export class TicketService {
         data: {
           status: EStatus.COMPLETED,
           completedByNik: nik,
+          reason: null,
           completedAt: new Date(),
         },
       }),
@@ -435,5 +445,24 @@ export class TicketService {
     return blobFailed > 0
       ? `Ticket ${ticketId} completed, ${blobFailed} blob gagal dihapus (non-fatal).`
       : `Ticket ${ticketId} completed.`;
+  }
+
+  async pendingTicket(ticketId: string, reason: string): Promise<string> {
+    // Cek tiket ada atau tidak
+    const ticket = await this.prismaService.dT_TICKET.findUnique({
+      where: { id: ticketId },
+    });
+
+    if (!ticket) throw new NotFoundException('Ticket tidak ditemukan');
+
+    // Update status tiket jadi PENDING
+    await this.prismaService.dT_TICKET.update({
+      where: { id: ticketId },
+      data: {
+        status: EStatus.PENDING,
+        reason: reason,
+      },
+    });
+    return `Ticket ${ticketId} berhasil di-hold`;
   }
 }

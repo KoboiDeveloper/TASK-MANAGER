@@ -31,7 +31,7 @@ export class OwnerGuard implements CanActivate {
       return true;
     }
 
-    if (!userNik || userNik !== paramNik) {
+    if (!userNik || userNik.trim().toLowerCase() !== paramNik.trim().toLowerCase()) {
       throw new ForbiddenException('You are not the owner of this resource');
     }
 

@@ -70,4 +70,9 @@ export class CreateTicketDto {
   @IsString()
   @MaxLength(12)
   grandTotal?: string | null;
+
+  @IsNotEmpty()
+  @IsString()
+  @MaxLength(12)
+  idtv!: string;
 }

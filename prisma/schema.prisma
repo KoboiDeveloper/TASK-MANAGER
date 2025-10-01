@@ -84,11 +84,13 @@ model DT_TICKET {
   noTelp      String @db.VarChar(15)
   category    String @db.VarChar(20)
   status      String @db.VarChar(15)
+  reason      String? @db.VarChar(15)
   description String @db.VarChar(255)
 
   fromPayment     String? @db.VarChar(20)
   toPayment       String? @db.VarChar(20)
   isDirectSelling Boolean @default(false)
+  idtv            String? @db.VarChar(12)
   billCode        String? @db.VarChar(20)
   grandTotal      String? @db.VarChar(20)
 

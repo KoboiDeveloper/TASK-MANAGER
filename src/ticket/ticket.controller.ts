@@ -120,6 +120,18 @@ export class TicketController {
 
   @UseGuards(AuthGuard)
   @Roles('SUPER', 'ADMIN')
+  @Post('pending')
+  async pendingTicket(@Body() body: { ticketId: string; reason: string }) {
+    try {
+      const res: string = await this.ticketService.pendingTicket(body.ticketId, body.reason);
+      return new CommonResponse('Ticket status Pending Successfully ', HttpStatus.OK, res);
+    } catch (e) {
+      return handleException((e as Error).message);
+    }
+  }
+
+  @UseGuards(AuthGuard)
+  @Roles('SUPER', 'ADMIN')
   @Post('repair-transaction')
   async repairTransaction(@Body() data: RequestRepairTransactionDto, @Req() request: Request) {
     const user = request['user'] as DT_USER;

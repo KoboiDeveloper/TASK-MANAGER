@@ -35,6 +35,10 @@ export class TicketListResponseDto {
 
   createdAt: Date;
 
+  idtv: string | null;
+
+  reason: string | null;
+
   images: ImageDto[];
 }
 
