@@ -185,14 +185,14 @@ export class UserService implements IuserService {
     await this.prismaService.dT_USER.update({ where: { nik }, data: { password } });
   }
 
-  async changePassword(nik: string, oldPassword: string, newPassword: string): Promise<void> {
+  async changePassword(nik: string, currentPassword: string, newPassword: string): Promise<void> {
     const user = await this.prismaService.dT_USER.findUnique({ where: { nik } });
 
     if (!user) {
       throw new NotFoundException('User not found');
     }
 
-    const isMatch = await comparePassword(oldPassword, user.password);
+    const isMatch = await comparePassword(currentPassword, user.password);
     if (!isMatch) {
       throw new BadRequestException('Old password is incorrect');
     }

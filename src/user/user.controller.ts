@@ -6,7 +6,7 @@ import {
   HttpStatus,
   Param,
   Patch,
-  Post,
+  Post, Res,
   UseGuards,
 } from '@nestjs/common';
 import { UserService } from './user.service';
@@ -20,6 +20,7 @@ import { ResponseListUsersDto } from './dto/response-users.dto';
 import { Own } from '../security/own.decorator';
 import { ChangePasswordDto } from './dto/request/requestChangePassword';
 import { OwnerGuard } from '../security/own-guard';
+import { Response } from 'express';
 
 @UseGuards(AuthGuard)
 @Controller('api/users')
@@ -70,16 +71,28 @@ export class UserController {
     }
   }
 
-  @Own()
-  @UseGuards(AuthGuard, OwnerGuard)
-  @Patch('/change-password/:nik')
+  @Patch('change-password/:nik')
   @HttpCode(HttpStatus.OK)
-  async changePassword(@Param('nik') nik: string, @Body() data: ChangePasswordDto) {
+  @UseGuards(AuthGuard, OwnerGuard)
+  async changePassword(
+    @Param('nik') nik: string,
+    @Body() data: ChangePasswordDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
     try {
-      await this.userService.changePassword(nik, data.oldPassword, data.newPassword);
+      await this.userService.changePassword(nik, data.currentPassword, data.newPassword);
+
+      // clear cookie
+      res.clearCookie('access_token', {
+        path: '/',
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production', // true di production
+        sameSite: 'lax',
+      });
+
       return new CommonResponse('Password changed successfully', HttpStatus.OK, null);
-    } catch ({ message }) {
-      return handleException(message as string);
+    } catch (e) {
+      return handleException((e as Error).message);
     }
   }
 }

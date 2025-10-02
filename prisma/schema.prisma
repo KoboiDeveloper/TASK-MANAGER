@@ -84,7 +84,7 @@ model DT_TICKET {
   noTelp      String @db.VarChar(15)
   category    String @db.VarChar(20)
   status      String @db.VarChar(15)
-  reason      String? @db.VarChar(15)
+  reason      String? @db.VarChar(60)
   description String @db.VarChar(255)
 
   fromPayment     String? @db.VarChar(20)
