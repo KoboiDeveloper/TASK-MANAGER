@@ -1,4 +1,5 @@
 export enum ERole {
+  STAFF = 'STAFF',
   AC = 'AC',
   SC = 'SC',
   CASHIER = 'CASHIER',

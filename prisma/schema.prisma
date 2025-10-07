@@ -16,13 +16,21 @@ model DT_USER {
   roleId          String                @db.VarChar(20)
   handleWeb       Boolean               @default(false)
   statusActive    Boolean
+
+  //relation
   accessRegionIds DT_ACCESS_REGION[]
   accessStoreIds  DT_ACCESS_STORE[]
   role            DT_ROLE               @relation(fields: [roleId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   forgotPasswords LOG_FORGOT_PASSWORD[]
-
   ticketsHandled     DT_TICKET[] @relation("TicketHandler")
-  ticketsCompletedBy DT_TICKET[] @relation("TicketCompletedBy") // relasi balik
+  ticketsCompletedBy DT_TICKET[] @relation("TicketCompletedBy")
+  createdProjects   DT_PROJECT[]        @relation("CreatedProjects")
+  createdTasks      DT_TASK[]           @relation("CreatedTasks")
+  memberProjects    DT_MEMBER_PROJECT[]
+  assignedTasks     DT_ASSIGNEE_TASK[]
+  logs              LOG_ACTIVITY[]
+  sentInvites       LOG_INVITATION_PROJECT[] @relation("SenderInvites")
+  receivedInvites   LOG_INVITATION_PROJECT[] @relation("ReceiverInvites")
 }
 
 model DT_ACCESS_REGION {
@@ -130,3 +138,153 @@ model LOG_FORGOT_PASSWORD {
   expiresAt DateTime
   user      DT_USER  @relation(fields: [nik], references: [nik], onDelete: Cascade, onUpdate: NoAction)
 }
+
+/// ================================
+///  PROJECT MANAGEMENT DATABASE SCHEMA (fixed)
+/// ================================
+model DT_PROJECT {
+  id                String              @id @default(uuid()) @db.UniqueIdentifier
+  name              String              @db.VarChar(100)
+  desc              String              @db.VarChar(255)
+  createdBy         String              @db.Char(9)
+  createdAt         DateTime            @default(now())
+
+  // Relations
+  user              DT_USER             @relation("CreatedProjects", fields: [createdBy], references: [nik], onDelete: NoAction, onUpdate: NoAction)
+  members           DT_MEMBER_PROJECT[]
+  tasks             DT_TASK[]
+  activities        LOG_ACTIVITY[]
+  invitations       LOG_INVITATION_PROJECT[]
+  sections          DT_SECTION[]
+}
+
+/// ================================
+///  MEMBER MANAGEMENT
+/// ================================
+model DT_MEMBER_PROJECT {
+  id                 String              @id @default(uuid()) @db.UniqueIdentifier
+  projectId          String              @db.UniqueIdentifier
+  nik                String              @db.Char(9)
+  id_dt_project_role String              @db.VarChar(20)
+
+  // Relations
+  project            DT_PROJECT          @relation(fields: [projectId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  user               DT_USER             @relation(fields: [nik], references: [nik], onDelete: Cascade, onUpdate: NoAction)
+  roleProject        DT_PROJECT_ROLE     @relation(fields: [id_dt_project_role], references: [id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+/// ================================
+///  ROLE
+/// ================================
+model DT_PROJECT_ROLE {
+  id       String              @id @db.VarChar(20)
+  name     String              @db.VarChar(50)
+  members  DT_MEMBER_PROJECT[]
+}
+
+/// ================================
+///  TASK
+/// ================================
+model DT_TASK {
+  id                String              @id @default(uuid()) @db.UniqueIdentifier
+  name              String              @db.VarChar(100)
+  createdBy         String              @db.Char(9)
+  createdAt         DateTime            @default(now())
+  color             String?             @db.VarChar(30)
+  id_dt_project     String              @db.UniqueIdentifier
+  id_dt_section     String?             @db.UniqueIdentifier
+
+  // Relations
+  project           DT_PROJECT          @relation(fields: [id_dt_project], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  creator           DT_USER             @relation("CreatedTasks", fields: [createdBy], references: [nik], onDelete: NoAction, onUpdate: NoAction)
+  section           DT_SECTION?         @relation(fields: [id_dt_section], references: [id], onDelete: SetNull, onUpdate: NoAction)
+
+  details           DT_TASK_DETAIL[]
+  tags              DT_TAG[]
+  logs              LOG_ACTIVITY[]
+}
+
+/// ================================
+///  TASK DETAIL / SUBTASK
+/// ================================
+model DT_TASK_DETAIL {
+  id                String              @id @default(uuid()) @db.UniqueIdentifier
+  name              String              @db.VarChar(100)
+  id_dt_task        String              @db.UniqueIdentifier
+  duedate           DateTime?
+  createdAt         DateTime            @default(now())
+  priority          String?             @db.VarChar(20)
+  status            String?             @db.VarChar(20)
+
+  // Relations
+  task              DT_TASK             @relation(fields: [id_dt_task], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  assignees         DT_ASSIGNEE_TASK[]
+}
+
+/// ================================
+///  TASK ASSIGNEE
+/// ================================
+model DT_ASSIGNEE_TASK {
+  id                String              @id @default(uuid()) @db.UniqueIdentifier
+  id_task_detail    String              @db.UniqueIdentifier
+  nik               String              @db.Char(9)
+
+  // Relations
+  taskDetail        DT_TASK_DETAIL      @relation(fields: [id_task_detail], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  user              DT_USER             @relation(fields: [nik], references: [nik], onDelete: Cascade, onUpdate: NoAction)
+}
+
+/// ================================
+///  SECTION
+/// ================================
+model DT_SECTION {
+  id                String              @id @default(uuid()) @db.UniqueIdentifier
+  id_dt_project     String              @db.UniqueIdentifier
+  name              String              @db.VarChar(100)
+
+  project           DT_PROJECT          @relation(fields: [id_dt_project], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  tasks             DT_TASK[]
+}
+
+/// ================================
+///  TAG (many-to-one to TASK)
+/// ================================
+model DT_TAG {
+  id                String              @id @default(uuid()) @db.UniqueIdentifier
+  name              String              @db.VarChar(100)
+  id_dt_task        String              @db.UniqueIdentifier
+
+  task              DT_TASK             @relation(fields: [id_dt_task], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+/// ================================
+///  LOGS
+/// ================================
+model LOG_ACTIVITY {
+  id                String              @id @default(uuid()) @db.UniqueIdentifier
+  projectId         String              @db.UniqueIdentifier
+  taskid            String?             @db.UniqueIdentifier
+  nik               String              @db.Char(9)
+  action            String              @db.VarChar(255)
+
+  project           DT_PROJECT          @relation(fields: [projectId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  task              DT_TASK?            @relation(fields: [taskid], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  user              DT_USER             @relation(fields: [nik], references: [nik], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model LOG_INVITATION_PROJECT {
+  id                String              @id @default(uuid()) @db.UniqueIdentifier
+  sender            String              @db.Char(9)
+  to                String              @db.Char(9)
+  projectId         String              @db.UniqueIdentifier
+  status            String?             @db.VarChar(50)
+  asRole            String?             @db.VarChar(20)
+  expire            DateTime?
+
+  project           DT_PROJECT          @relation(fields: [projectId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  senderUser        DT_USER             @relation("SenderInvites", fields: [sender], references: [nik], onDelete: NoAction, onUpdate: NoAction)
+  receiverUser      DT_USER             @relation("ReceiverInvites", fields: [to], references: [nik], onDelete: NoAction, onUpdate: NoAction)
+}
+
+

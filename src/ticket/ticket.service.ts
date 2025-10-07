@@ -222,12 +222,7 @@ export class TicketService {
         reason: true,
         completedAt: true,
         createdAt: true,
-        handler: {
-          select: {
-            nik: true,
-            nama: true,
-          },
-        },
+        handler: { select: { nik: true, nama: true, noTelp: true } },
         images: {
           select: {
             id: true,
@@ -320,7 +315,7 @@ export class TicketService {
         completedBy: { select: { nama: true } },
         completedAt: true,
         createdAt: true,
-        handler: { select: { nik: true, nama: true } },
+        handler: { select: { nik: true, nama: true, noTelp: true } },
         images: {
           select: {
             id: true,
@@ -352,7 +347,7 @@ export class TicketService {
         completedBy: { select: { nama: true } },
         completedAt: true,
         createdAt: true,
-        handler: { select: { nik: true, nama: true } },
+        handler: { select: { nik: true, nama: true, noTelp: true } },
         images: {
           select: {
             id: true,

@@ -11,6 +11,7 @@ import { StoreModule } from './store/store.module';
 import { RegionModule } from './region/region.module';
 import { TicketModule } from './ticket/ticket.module';
 import { ClientsModule, Transport } from '@nestjs/microservices';
+import { ProjectModule } from './project/project.module';
 
 @Module({
   imports: [
@@ -26,6 +27,7 @@ import { ClientsModule, Transport } from '@nestjs/microservices';
     StoreModule,
     RegionModule,
     TicketModule,
+    ProjectModule,
   ],
   controllers: [AppController],
   providers: [AppService],
