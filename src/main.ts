@@ -39,6 +39,9 @@ async function bootstrap(): Promise<void> {
         durable: true,
         arguments: { 'x-queue-type': 'quorum' },
       },
+      prefetchCount: 10,
+      reconnectTimeInSeconds: 5,
+      heartbeatIntervalInSeconds: 30,
     },
   });
 

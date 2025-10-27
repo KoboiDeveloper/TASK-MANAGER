@@ -27,7 +27,8 @@ model DT_USER {
   createdProjects   DT_PROJECT[]        @relation("CreatedProjects")
   createdTasks      DT_TASK[]           @relation("CreatedTasks")
   memberProjects    DT_MEMBER_PROJECT[]
-  assignedTasks     DT_ASSIGNEE_TASK[]
+  assignedTasks       DT_ASSIGNEE_TASK[]        @relation("AssigneeTaskUser")
+  assignedTaskDetails DT_ASSIGNEE_TASK_DETAIL[] @relation("AssigneeTaskDetailUser")
   logs              LOG_ACTIVITY[]
   sentInvites       LOG_INVITATION_PROJECT[] @relation("SenderInvites")
   receivedInvites   LOG_INVITATION_PROJECT[] @relation("ReceiverInvites")
@@ -140,22 +141,24 @@ model LOG_FORGOT_PASSWORD {
 }
 
 /// ================================
-///  PROJECT MANAGEMENT DATABASE SCHEMA (fixed)
+///  PROJECT MANAGEMENT DATABASE SCHEMA
 /// ================================
 model DT_PROJECT {
-  id                String              @id @default(uuid()) @db.UniqueIdentifier
-  name              String              @db.VarChar(100)
-  desc              String              @db.VarChar(255)
-  createdBy         String              @db.Char(9)
-  createdAt         DateTime            @default(now())
+  id          String        @id @default(uuid()) @db.UniqueIdentifier
+  name        String        @db.VarChar(100)
+  desc        String?       @db.VarChar(255)
+  color       String?     @db.VarChar(30)
+  createdBy   String        @db.Char(9)
+  createdAt   DateTime      @default(now())
+  user        DT_USER       @relation("CreatedProjects", fields: [createdBy], references: [nik], onDelete: NoAction, onUpdate: NoAction)
 
-  // Relations
-  user              DT_USER             @relation("CreatedProjects", fields: [createdBy], references: [nik], onDelete: NoAction, onUpdate: NoAction)
-  members           DT_MEMBER_PROJECT[]
-  tasks             DT_TASK[]
-  activities        LOG_ACTIVITY[]
-  invitations       LOG_INVITATION_PROJECT[]
-  sections          DT_SECTION[]
+  // Relasi ke data lain
+  members     DT_MEMBER_PROJECT[]
+  sections    DT_SECTION[]          // Cascade dari Project → Section
+  tasks       DT_TASK[]             // NoAction (hindari cyclic cascade)
+  tags        DT_TAG[]              @relation("ProjectTags")
+  activities  LOG_ACTIVITY[]
+  invitations LOG_INVITATION_PROJECT[]
 }
 
 /// ================================
@@ -186,24 +189,33 @@ model DT_PROJECT_ROLE {
 ///  TASK
 /// ================================
 model DT_TASK {
-  id                String              @id @default(uuid()) @db.UniqueIdentifier
-  name              String              @db.VarChar(100)
-  createdBy         String              @db.Char(9)
-  createdAt         DateTime            @default(now())
-  color             String?             @db.VarChar(30)
-  id_dt_project     String              @db.UniqueIdentifier
-  id_dt_section     String?             @db.UniqueIdentifier
+  id              String      @id @default(uuid()) @db.UniqueIdentifier
+  name            String      @db.VarChar(100)
+  createdBy       String      @db.Char(9)
+  desc            String?      @db.VarChar(100)
+  dueDate         DateTime?
+  status          Boolean     @default(false)
+  createdAt       DateTime    @default(now())
+  id_dt_project   String      @db.UniqueIdentifier
+  id_dt_section   String?     @db.UniqueIdentifier
+  assignees         DT_ASSIGNEE_TASK[]
+  rank          String?  @db.VarChar(16)
 
-  // Relations
-  project           DT_PROJECT          @relation(fields: [id_dt_project], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  project DT_PROJECT @relation(fields: [id_dt_project], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  creator DT_USER @relation("CreatedTasks", fields: [createdBy], references: [nik], onDelete: NoAction, onUpdate: NoAction)
+  section DT_SECTION? @relation(fields: [id_dt_section], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
-  creator           DT_USER             @relation("CreatedTasks", fields: [createdBy], references: [nik], onDelete: NoAction, onUpdate: NoAction)
-  section           DT_SECTION?         @relation(fields: [id_dt_section], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  details DT_TASK_DETAIL[]
+  tags    DT_TAG[]
+  logs    LOG_ACTIVITY[]
 
-  details           DT_TASK_DETAIL[]
-  tags              DT_TAG[]
-  logs              LOG_ACTIVITY[]
+  @@index([id_dt_project])
+  @@index([id_dt_section])
+  @@index([rank])
+  @@index([createdBy])
 }
+
+
 
 /// ================================
 ///  TASK DETAIL / SUBTASK
@@ -212,51 +224,88 @@ model DT_TASK_DETAIL {
   id                String              @id @default(uuid()) @db.UniqueIdentifier
   name              String              @db.VarChar(100)
   id_dt_task        String              @db.UniqueIdentifier
-  duedate           DateTime?
+  dueDate           DateTime?
   createdAt         DateTime            @default(now())
   priority          String?             @db.VarChar(20)
   status            String?             @db.VarChar(20)
 
   // Relations
   task              DT_TASK             @relation(fields: [id_dt_task], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  assignees         DT_ASSIGNEE_TASK[]
+  assignees         DT_ASSIGNEE_TASK_DETAIL[]
 }
 
 /// ================================
 ///  TASK ASSIGNEE
 /// ================================
 model DT_ASSIGNEE_TASK {
-  id                String              @id @default(uuid()) @db.UniqueIdentifier
-  id_task_detail    String              @db.UniqueIdentifier
-  nik               String              @db.Char(9)
+  id         String   @id @default(uuid()) @db.UniqueIdentifier
+  taskId     String   @db.UniqueIdentifier
+  nik        String   @db.Char(9)
+  name        String  @db.VarChar(50)
+  assignedAt DateTime @default(now())
 
-  // Relations
-  taskDetail        DT_TASK_DETAIL      @relation(fields: [id_task_detail], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  user              DT_USER             @relation(fields: [nik], references: [nik], onDelete: Cascade, onUpdate: NoAction)
+  task DT_TASK @relation(fields: [taskId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  // RELASI BERNAMA → "AssigneeTaskUser"
+  user DT_USER @relation("AssigneeTaskUser", fields: [nik], references: [nik], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([taskId, nik])
+  @@index([nik])
 }
+
+model DT_ASSIGNEE_TASK_DETAIL {
+  id           String   @id @default(uuid()) @db.UniqueIdentifier
+  taskDetailId String   @db.UniqueIdentifier
+  nik          String   @db.Char(9)
+  name         String  @db.VarChar(50)
+  assignedAt   DateTime @default(now())
+
+  taskDetail DT_TASK_DETAIL @relation(fields: [taskDetailId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  // RELASI BERNAMA → "AssigneeTaskDetailUser"
+  user DT_USER @relation("AssigneeTaskDetailUser", fields: [nik], references: [nik], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([taskDetailId, nik])
+  @@index([nik])
+}
+
+
 
 /// ================================
 ///  SECTION
 /// ================================
 model DT_SECTION {
-  id                String              @id @default(uuid()) @db.UniqueIdentifier
-  id_dt_project     String              @db.UniqueIdentifier
-  name              String              @db.VarChar(100)
+  id            String      @id @default(uuid()) @db.UniqueIdentifier
+  id_dt_project String      @db.UniqueIdentifier
+  name          String      @db.VarChar(100)
+  rank          String      @db.VarChar(32) @default("8000000000000000")
+  // Relasi ke Project
+project DT_PROJECT @relation(fields: [id_dt_project], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
-  project           DT_PROJECT          @relation(fields: [id_dt_project], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  tasks             DT_TASK[]
+  // Relasi ke Task
+  tasks   DT_TASK[]
+
+  @@index([id_dt_project])
 }
 
+
 /// ================================
-///  TAG (many-to-one to TASK)
+///  TAG
 /// ================================
 model DT_TAG {
-  id                String              @id @default(uuid()) @db.UniqueIdentifier
-  name              String              @db.VarChar(100)
-  id_dt_task        String              @db.UniqueIdentifier
+  id             String      @id @default(uuid()) @db.UniqueIdentifier
+  id_dt_task     String?     @db.UniqueIdentifier
+  id_dt_project  String      @db.UniqueIdentifier
+  name           String      @db.VarChar(50)
 
-  task              DT_TASK             @relation(fields: [id_dt_task], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  task    DT_TASK?    @relation(fields: [id_dt_task], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  project DT_PROJECT  @relation("ProjectTags", fields: [id_dt_project], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([id_dt_project])
+  @@index([id_dt_task])
 }
+
+
 
 /// ================================
 ///  LOGS

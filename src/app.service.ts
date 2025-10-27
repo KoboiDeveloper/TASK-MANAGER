@@ -4,6 +4,7 @@ import { PrismaService } from './prisma/prisma.service';
 import { encodePassword } from './utils/bcrypt';
 import { RoleService } from './role/role.service';
 import { ERole } from './constant/ERole';
+import { EProjectRole } from './constant/EProjectRole';
 
 @Injectable()
 export class AppService implements OnModuleInit {
@@ -21,6 +22,7 @@ export class AppService implements OnModuleInit {
 
   async onModuleInit(): Promise<void> {
     await this.createRolesIfNotExist();
+    await this.createRoleProjectsIfNotExist();
     const userCount = await this.prismaService.dT_USER.count();
 
     if (userCount > 0) {
@@ -74,7 +76,23 @@ export class AppService implements OnModuleInit {
         },
       });
     }
-
     this.logger.log('✅ Roles are registered (or already exist)');
+  }
+
+  private async createRoleProjectsIfNotExist(): Promise<void> {
+    const allProjectRoles = Object.values(EProjectRole);
+
+    for (const Projectrole of allProjectRoles) {
+      await this.prismaService.dT_PROJECT_ROLE.upsert({
+        where: { id: Projectrole.toString() },
+        update: {},
+        create: {
+          id: Projectrole.toString(),
+          name: Projectrole.toString(),
+        },
+      });
+    }
+
+    this.logger.log('✅ Role Projects are registered (or already exist)');
   }
 }
