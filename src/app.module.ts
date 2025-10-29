@@ -11,13 +11,15 @@ import { StoreModule } from './store/store.module';
 import { RegionModule } from './region/region.module';
 import { TicketModule } from './ticket/ticket.module';
 import { ProjectModule } from './project/project.module';
-
+import { CronjobModule } from './utils/cronjob/cronjob.module';
+import { ScheduleModule } from '@nestjs/schedule';
 @Module({
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
       envFilePath: '.env',
     }),
+    ScheduleModule.forRoot(),
     UserModule,
     AuthModule,
     PrismaModule,
@@ -27,6 +29,7 @@ import { ProjectModule } from './project/project.module';
     RegionModule,
     TicketModule,
     ProjectModule,
+    CronjobModule,
   ],
   controllers: [AppController],
   providers: [AppService],

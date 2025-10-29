@@ -123,6 +123,7 @@ model DT_IMAGES {
   url      String @db.VarChar(255)
   filename String @db.VarChar(20)
   mimeType String @db.VarChar(20)
+  createdAt DateTime @default(now())
   bytes    Int
 
   ticketId String?    @db.VarChar(20)

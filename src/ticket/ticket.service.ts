@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException, Logger, Inject } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { put, del } from '@vercel/blob';
+import { put } from '@vercel/blob';
 import { CreateTicketDto } from './dto/request/requestCreateTicket.dto';
 
 import { assertImageFile, safePathname, getOriginalName } from '../utils/file';
@@ -65,25 +65,25 @@ export class TicketService {
     return handlerNiks[nextIdx];
   }
 
-  private async ensureTicket(ticketId: string): Promise<{ id: string }> {
-    if (!ticketId) throw new BadRequestException('ticketId wajib diisi');
-    const ticket = await this.prismaService.dT_TICKET.findUnique({
-      where: { id: ticketId },
-      select: { id: true },
-    });
-    if (!ticket) throw new NotFoundException('Ticket tidak ditemukan');
-    return ticket;
-  }
-
-  private async tryDeleteBlob(url: string, context: string): Promise<boolean> {
-    try {
-      await del(url);
-      return true;
-    } catch (e) {
-      this.logger.warn(`Non-fatal: gagal hapus blob (${context}): ${url} :: ${normalizeErrMsg(e)}`);
-      return false;
-    }
-  }
+  // private async ensureTicket(ticketId: string): Promise<{ id: string }> {
+  //   if (!ticketId) throw new BadRequestException('ticketId wajib diisi');
+  //   const ticket = await this.prismaService.dT_TICKET.findUnique({
+  //     where: { id: ticketId },
+  //     select: { id: true },
+  //   });
+  //   if (!ticket) throw new NotFoundException('Ticket tidak ditemukan');
+  //   return ticket;
+  // }
+  //
+  // private async tryDeleteBlob(url: string, context: string): Promise<boolean> {
+  //   try {
+  //     await del(url);
+  //     return true;
+  //   } catch (e) {
+  //     this.logger.warn(`Non-fatal: gagal hapus blob (${context}): ${url} :: ${normalizeErrMsg(e)}`);
+  //     return false;
+  //   }
+  // }
 
   private async generateTicketId(): Promise<string> {
     const prefix = 'TC-';
@@ -407,11 +407,11 @@ export class TicketService {
     if (!ticket) throw new NotFoundException('Ticket tidak ditemukan');
 
     // 2) Ambil semua images terkait
-    const images = await this.prismaService.dT_IMAGES.findMany({
-      where: { ticketId },
-      select: { id: true, url: true },
-    });
-    const imageIds = images.map((i) => i.id);
+    // const images = await this.prismaService.dT_IMAGES.findMany({
+    //   where: { ticketId },
+    //   select: { id: true, url: true },
+    // });
+    // const imageIds = images.map((i) => i.id);
 
     // 3) Transaction untuk update tiket + hapus images (sekali saja)
     await this.prismaService.$transaction([
@@ -424,22 +424,20 @@ export class TicketService {
           completedAt: new Date(),
         },
       }),
-      ...(imageIds.length > 0
-        ? [this.prismaService.dT_IMAGES.deleteMany({ where: { id: { in: imageIds } } })]
-        : []),
+      // ...(imageIds.length > 0
+      //   ? [this.prismaService.dT_IMAGES.deleteMany({ where: { id: { in: imageIds } } })]
+      //   : []),
     ]);
 
-    // 4) Hapus blob di Vercel pakai helper
-    let blobFailed = 0;
-    for (const img of images) {
-      const ok = await this.tryDeleteBlob(img.url, `completeTicket(${ticketId}) id=${img.id}`);
-      if (!ok) blobFailed++;
-    }
+    // // 4) Hapus blob di Vercel pakai helper
+    // let blobFailed = 0;
+    // for (const img of images) {
+    //   const ok = await this.tryDeleteBlob(img.url, `completeTicket(${ticketId}) id=${img.id}`);
+    //   if (!ok) blobFailed++;
+    // }
 
     // 5) Return hasil
-    return blobFailed > 0
-      ? `Ticket ${ticketId} completed, ${blobFailed} blob gagal dihapus (non-fatal).`
-      : `Ticket ${ticketId} completed.`;
+    return `Ticket ${ticketId} completed.`;
   }
 
   async pendingTicket(ticketId: string, reason: string): Promise<string> {
