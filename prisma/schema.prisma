@@ -28,7 +28,7 @@ model DT_USER {
   createdTasks      DT_TASK[]           @relation("CreatedTasks")
   memberProjects    DT_MEMBER_PROJECT[]
   assignedTasks       DT_ASSIGNEE_TASK[]        @relation("AssigneeTaskUser")
-  assignedTaskDetails DT_ASSIGNEE_TASK_DETAIL[] @relation("AssigneeTaskDetailUser")
+assignedSubTasks DT_ASSIGNEE_SUBTASK[] @relation("AssigneeSubTaskUser")
   logs              LOG_ACTIVITY[]
   sentInvites       LOG_INVITATION_PROJECT[] @relation("SenderInvites")
   receivedInvites   LOG_INVITATION_PROJECT[] @relation("ReceiverInvites")
@@ -206,7 +206,7 @@ model DT_TASK {
   creator DT_USER @relation("CreatedTasks", fields: [createdBy], references: [nik], onDelete: NoAction, onUpdate: NoAction)
   section DT_SECTION? @relation(fields: [id_dt_section], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
-  details DT_TASK_DETAIL[]
+  subTask DT_SUB_TASK[]
   tags    DT_TAG[]
   logs    LOG_ACTIVITY[]
 
@@ -219,20 +219,19 @@ model DT_TASK {
 
 
 /// ================================
-///  TASK DETAIL / SUBTASK
+///  SUBTASK
 /// ================================
-model DT_TASK_DETAIL {
+model DT_SUB_TASK {
   id                String              @id @default(uuid()) @db.UniqueIdentifier
   name              String              @db.VarChar(100)
   id_dt_task        String              @db.UniqueIdentifier
   dueDate           DateTime?
   createdAt         DateTime            @default(now())
-  priority          String?             @db.VarChar(20)
-  status            String?             @db.VarChar(20)
-
+  rank              String?             @db.VarChar(16)
+  status            Boolean             @default(false)
   // Relations
   task              DT_TASK             @relation(fields: [id_dt_task], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  assignees         DT_ASSIGNEE_TASK_DETAIL[]
+  assignees         DT_ASSIGNEE_SUBTASK[]
 }
 
 /// ================================
@@ -254,19 +253,18 @@ model DT_ASSIGNEE_TASK {
   @@index([nik])
 }
 
-model DT_ASSIGNEE_TASK_DETAIL {
+model DT_ASSIGNEE_SUBTASK {
   id           String   @id @default(uuid()) @db.UniqueIdentifier
-  taskDetailId String   @db.UniqueIdentifier
+  subTaskId String   @db.UniqueIdentifier
   nik          String   @db.Char(9)
   name         String  @db.VarChar(50)
   assignedAt   DateTime @default(now())
 
-  taskDetail DT_TASK_DETAIL @relation(fields: [taskDetailId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+    subTask DT_SUB_TASK @relation(fields: [subTaskId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  // RELASI BERNAMA → "AssigneeSubTaskUser"
+  user DT_USER @relation("AssigneeSubTaskUser", fields: [nik], references: [nik], onDelete: NoAction, onUpdate: NoAction)
 
-  // RELASI BERNAMA → "AssigneeTaskDetailUser"
-  user DT_USER @relation("AssigneeTaskDetailUser", fields: [nik], references: [nik], onDelete: NoAction, onUpdate: NoAction)
-
-  @@unique([taskDetailId, nik])
+  @@unique([subTaskId, nik])
   @@index([nik])
 }
 

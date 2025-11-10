@@ -76,7 +76,7 @@ export class CronjobService {
 
   constructor(private readonly prisma: PrismaService) {}
 
-  /** ⏱ TEST: tanggal 29 jam 16:49 WIB (ganti ke '0 0 0 1 * *' untuk produksi) */
+  /** ⏱ TEST: tanggal 29 jam 16:49 WIB (ganti ke '0 0 0 29 * *' untuk produksi) */
   @Cron('0 00 00 29 * *', { timeZone: 'Asia/Jakarta' })
   async cleanupOldImages(): Promise<CleanupStats> {
     const started = Date.now();

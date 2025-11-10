@@ -12,14 +12,18 @@ import {
   Req,
   UseGuards,
   Patch,
+  Query,
 } from '@nestjs/common';
 import { Request } from 'express';
 import { ProjectService } from './project.service';
 import {
-  AddTaskDetailRequest,
+  AddSubTaskRequest,
   CreateProjectRequest,
   CreateTaskProjectRequest,
-  UpdateTaskDetailRequest, UpdateTaskRequest,
+  RemoveSectionParamsDto,
+  RemoveSectionQueryDto,
+  UpdateSubTaskRequest,
+  UpdateTaskRequest,
 } from './dto/request';
 import { AuthGuard } from '../security/authGuard';
 import { ProjectMemberGuard } from '../security/project-member.guard';
@@ -123,6 +127,7 @@ export class ProjectController {
       return handleException(message as string);
     }
   }
+
   @Post(':projectId/task')
   @UseGuards(ProjectMemberGuard)
   async createTask(
@@ -157,43 +162,39 @@ export class ProjectController {
   // 🔹 TASK DETAIL MANAGEMENT
   // =========================================================
 
-  @Post('task/:taskId/detail')
+  @Post('task/:taskId/subtask')
   @UseGuards(ProjectMemberGuard)
-  async addTaskDetail(
-    @Param('taskId', ParseUUIDPipe) taskId: string,
-    @Body() dto: AddTaskDetailRequest,
-  ) {
+  async addSubTask(@Param('taskId') taskId: string, @Body() dto: AddSubTaskRequest) {
     try {
-      const detail = await this.projectService.addTaskDetail(taskId, dto);
+      const detail = await this.projectService.addSubTask(taskId, dto);
       return new CommonResponse('Task detail added successfully', HttpStatus.CREATED, detail);
     } catch ({ message }) {
       return handleException(message as string);
     }
   }
 
-  @Put('task/detail/:detailId')
+  @Put('subtask/:subtaskId')
   @UseGuards(ProjectMemberGuard)
-  async updateTaskDetail(
-    @Param('detailId', ParseUUIDPipe) detailId: string,
-    @Body() dto: UpdateTaskDetailRequest,
-  ) {
-    try {
-      const updated = await this.projectService.updateTaskDetail(detailId, dto);
-      return new CommonResponse('Task detail updated successfully', HttpStatus.OK, updated);
-    } catch ({ message }) {
-      return handleException(message as string);
-    }
+  async updateSubTask(@Param('subtaskId') subtaskId: string, @Body() dto: UpdateSubTaskRequest) {
+    const updated = await this.projectService.updateSubTask(subtaskId, dto);
+    return new CommonResponse('Subtask updated successfully', HttpStatus.OK, updated);
   }
 
-  @Delete('task/detail/:detailId')
+  @Delete('subtask/:subtaskId')
   @UseGuards(ProjectMemberGuard)
-  async deleteTaskDetail(@Param('detailId', ParseUUIDPipe) detailId: string) {
-    try {
-      const res = await this.projectService.deleteTaskDetail(detailId);
-      return new CommonResponse(res.message, HttpStatus.OK, null);
-    } catch ({ message }) {
-      return handleException(message as string);
-    }
+  async deleteSubTask(@Param('subtaskId') subtaskId: string) {
+    const res = await this.projectService.deleteSubTask(subtaskId);
+    return new CommonResponse(res.message, HttpStatus.OK, null);
+  }
+
+  @Patch('subtask/:subtaskId/move')
+  @UseGuards(ProjectMemberGuard)
+  async moveSubTask(
+    @Param('subtaskId') subtaskId: string,
+    @Body() body: { beforeId?: string | null; afterId?: string | null },
+  ) {
+    const updated = await this.projectService.moveSubTask(subtaskId, body);
+    return new CommonResponse('Subtask moved successfully', HttpStatus.OK, updated);
   }
 
   // =========================================================
@@ -239,14 +240,15 @@ export class ProjectController {
   @UseGuards(ProjectMemberGuard)
   @ProjectRoles(EProjectRole.OWNER)
   async deleteSection(
-    @Param('projectId', ParseUUIDPipe) projectId: string,
-    @Param('sectionId', ParseUUIDPipe) sectionId: string,
+    @Param() { projectId, sectionId }: RemoveSectionParamsDto,
+    @Query() query: RemoveSectionQueryDto,
   ) {
     try {
-      // sebaiknya pakai method service khusus; sementara minimal:
-      const deleted = await this.projectService['prismaService'].dT_SECTION.delete({
-        where: { id: sectionId },
-        select: { id: true, name: true },
+      const includeTask = query.includeTask ?? false;
+      const deleted = await this.projectService.removeSection({
+        projectId,
+        sectionId,
+        includeTask,
       });
       return new CommonResponse('Section deleted successfully', HttpStatus.OK, deleted);
     } catch ({ message }) {
@@ -263,7 +265,6 @@ export class ProjectController {
     @Body() body: { name: string },
   ) {
     try {
-      // sebaiknya pakai method service khusus; sementara minimal:
       const updated = await this.projectService.updateSection(sectionId, body.name);
       return new CommonResponse('Section renamed successfully', HttpStatus.OK, updated);
     } catch ({ message }) {

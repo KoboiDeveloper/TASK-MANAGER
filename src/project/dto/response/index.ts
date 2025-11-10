@@ -18,6 +18,14 @@ type Assignees = {
   name: string;
   assignedAt: Date;
 };
+export type SubTask = {
+  id: string;
+  name: string;
+  dueDate: Date | null;
+  status: boolean;
+  assignees: Assignees[];
+};
+
 export type TaskNonSection = {
   id: string;
   name: string;
@@ -26,6 +34,7 @@ export type TaskNonSection = {
   status: boolean;
   assignees: Assignees[];
   creator: { nama: string };
+  subTask: SubTask[];
 };
 export type SectionGroup = {
   id: string;

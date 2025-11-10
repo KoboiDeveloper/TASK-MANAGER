@@ -7,17 +7,19 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import {
-  AddTaskDetailRequest,
+  AddSubTaskRequest,
   CreateProjectRequest,
   CreateTaskProjectRequest,
-  UpdateTaskDetailRequest,
+  RemoveSectionArgs,
+  UpdateSubTaskRequest,
   UpdateTaskRequest,
 } from './dto/request';
 import { EProjectRole } from '../constant/EProjectRole';
-import { DT_PROJECT, DT_SECTION, DT_TAG, DT_TASK, DT_TASK_DETAIL, Prisma } from '@prisma/client';
+import { DT_PROJECT, DT_SECTION, DT_TAG, DT_TASK, DT_SUB_TASK, Prisma } from '@prisma/client';
 import {
   ProjectDetail,
   ProjectMemberFlat,
+  SubTask,
   TaskNonSection,
   TaskSectionResponse,
 } from './dto/response';
@@ -33,7 +35,11 @@ export class ProjectService {
 
   async ownProjects(nik: string): Promise<DT_PROJECT[]> {
     return this.prismaService.dT_PROJECT.findMany({
-      where: { user: { nik } },
+      where: {
+        members: {
+          some: { nik: { equals: nik } },
+        },
+      },
       orderBy: { name: 'asc' },
     });
   }
@@ -66,7 +72,7 @@ export class ProjectService {
     nik: string,
     data: CreateTaskProjectRequest,
   ): Promise<string> {
-    const { name, section, tag } = data;
+    const { name, section, tag, desc } = data;
 
     await this.ensureProjectExists(projectId);
 
@@ -80,6 +86,7 @@ export class ProjectService {
     const task = await this.prismaService.dT_TASK.create({
       data: {
         name,
+        desc,
         id_dt_project: projectId,
         createdBy: nik,
         id_dt_section: sectionEntity?.id ?? null,
@@ -165,7 +172,6 @@ export class ProjectService {
           section: true,
           assignees: true,
           tags: true,
-          // details: true, logs: true, // tambahkan bila perlu
         },
       });
     });
@@ -184,78 +190,104 @@ export class ProjectService {
     if (!pid) throw new BadRequestException('Invalid projectId');
     if (!tid) throw new BadRequestException('Invalid taskId');
 
-    // 1) Pastikan task ada & milik project ini
+    // 1) Task harus ada & milik project
     const task = await this.prismaService.dT_TASK.findFirst({
       where: { id: tid, id_dt_project: pid },
       select: { id: true, id_dt_project: true, id_dt_section: true, rank: true },
     });
     if (!task) throw new NotFoundException(`Task ${tid} not found in project ${pid}`);
 
-    // 2) Tentukan section tujuan:
-    //    - kalau 'targetSectionId' tidak DIKIRIM → reorder in-place (pakai section asal)
-    //    - kalau DIKIRIM null → pindah ke UNLOCATED
-    //    - kalau DIKIRIM UUID → pindah ke section tsb (divalidasi)
+    // 2) Tujuan section:
+    //    - properti tSectionId TIDAK DIKIRIM => reorder in-place
+    //    - DIKIRIM null => pindah ke UNLOCATED
+    //    - DIKIRIM UUID => pindah ke section tsb
     let destSectionId: string | null;
     if ('targetSectionId' in body) {
       const normTarget = this.normalizeGuid(body.targetSectionId ?? null);
       destSectionId = normTarget ?? null;
     } else {
-      destSectionId = task.id_dt_section; // reorder di section yang sama
+      destSectionId = task.id_dt_section; // in-place
     }
 
     if (destSectionId) {
       await this.ensureSectionExists(pid, destSectionId);
     }
 
-    // 3) Normalisasi tetangga (wajib berada di section tujuan)
-    const beforeId = this.normalizeGuid(body.beforeId ?? null);
-    const afterId = this.normalizeGuid(body.afterId ?? null);
-
-    // hindari self-reference
-    const safeBeforeId = beforeId === tid ? null : beforeId;
-    const safeAfterId = afterId === tid ? null : afterId;
+    // 3) Normalisasi tetangga (harus di section tujuan)
+    const beforeIdRaw = this.normalizeGuid(body.beforeId ?? null);
+    const afterIdRaw = this.normalizeGuid(body.afterId ?? null);
+    const beforeId = beforeIdRaw === tid ? null : beforeIdRaw; // hindari self
+    const afterId = afterIdRaw === tid ? null : afterIdRaw;
 
     // 4) Ambil rank tetangga di section tujuan
     const [before, after] = await Promise.all([
-      safeBeforeId
+      beforeId
         ? this.prismaService.dT_TASK.findFirst({
-            where: { id: safeBeforeId, id_dt_project: pid, id_dt_section: destSectionId ?? null },
+            where: { id: beforeId, id_dt_project: pid, id_dt_section: destSectionId ?? null },
             select: { rank: true },
           })
         : Promise.resolve(null),
-      safeAfterId
+      afterId
         ? this.prismaService.dT_TASK.findFirst({
-            where: { id: safeAfterId, id_dt_project: pid, id_dt_section: destSectionId ?? null },
+            where: { id: afterId, id_dt_project: pid, id_dt_section: destSectionId ?? null },
             select: { rank: true },
           })
         : Promise.resolve(null),
     ]);
 
-    // 5) Jika before/after kosong → taruh di akhir
-    let newRank: string;
-    if (!before && !after) {
-      const last = await this.prismaService.dT_TASK.findFirst({
+    // 5) Hitung rank baru (LIST DESC)
+    const computeNewRank = async (): Promise<string> => {
+      // ✅ Both neighbors (before = di atas, after = di bawah)
+      if (before && after) {
+        return this.rankBetween(before.rank ?? null, after.rank ?? null);
+      }
+
+      // ✅ Only beforeId → taruh TEPAT di bawah 'before'
+      if (before && !after) {
+        const nextBelow = await this.prismaService.dT_TASK.findFirst({
+          where: {
+            id_dt_project: pid,
+            id_dt_section: destSectionId ?? null,
+            rank: { gt: before.rank ?? undefined }, // ASC: bawah = rank lebih besar
+          },
+          orderBy: { rank: 'asc' }, // yang paling dekat di bawah
+          select: { rank: true },
+        });
+        return this.rankBetween(before.rank ?? null, nextBelow?.rank ?? null);
+      }
+
+      // ✅ Only afterId → taruh TEPAT di atas 'after'
+      if (!before && after) {
+        const prevAbove = await this.prismaService.dT_TASK.findFirst({
+          where: {
+            id_dt_project: pid,
+            id_dt_section: destSectionId ?? null,
+            rank: { lt: after.rank ?? undefined }, // ASC: atas = rank lebih kecil
+          },
+          orderBy: { rank: 'desc' }, // yang paling dekat di atas
+          select: { rank: true },
+        });
+        return this.rankBetween(prevAbove?.rank ?? null, after.rank ?? null);
+      }
+
+      const max = await this.prismaService.dT_TASK.findFirst({
         where: { id_dt_project: pid, id_dt_section: destSectionId ?? null },
         orderBy: { rank: 'desc' },
         select: { rank: true },
       });
-      newRank = this.rankAfter(last?.rank ?? null);
-    } else {
-      newRank = this.rankBetween(after?.rank ?? null, before?.rank ?? null);
-    }
+      return this.rankAfter(max?.rank ?? null);
+    };
+    const newRank = await computeNewRank();
 
-    // 6) Early exit bila benar-benar tidak berubah (jarang terjadi)
+    // 6) No-op guard kalau ternyata tidak berubah
     const sameSection = (task.id_dt_section ?? null) === (destSectionId ?? null);
     if (sameSection && task.rank === newRank) {
-      // Ambil entity terkini (tanpa include agar tipenya DT_TASK murni)
       const current = await this.prismaService.dT_TASK.findUnique({ where: { id: tid } });
-      // prisma.findUnique bisa return null secara tipe, tapi semestinya ada karena task sudah dicek
-      // fallback aman:
       if (!current) throw new NotFoundException(`Task ${tid} not found`);
       return current;
     }
 
-    // 7) Update section + rank baru
+    // 7) Update
     return this.prismaService.dT_TASK.update({
       where: { id: tid },
       data: {
@@ -266,45 +298,142 @@ export class ProjectService {
   }
 
   // =========================================================
-  // 🔹 TASK DETAIL MANAGEMENT
+  // 🔹 Sub TASK MANAGEMENT
   // =========================================================
 
-  async addTaskDetail(taskId: string, data: AddTaskDetailRequest): Promise<DT_TASK_DETAIL> {
+  async addSubTask(taskId: string, data: AddSubTaskRequest): Promise<DT_SUB_TASK> {
     const task = await this.prismaService.dT_TASK.findUnique({ where: { id: taskId } });
     if (!task) throw new NotFoundException(`Task ${taskId} not found`);
 
-    return this.prismaService.dT_TASK_DETAIL.create({
+    const max = await this.prismaService.dT_SUB_TASK.findFirst({
+      where: { id_dt_task: taskId },
+      orderBy: { rank: 'desc' }, // ambil terbesar
+      select: { rank: true },
+    });
+    const newRank = this.rankAfter(max?.rank ?? null);
+
+    return this.prismaService.dT_SUB_TASK.create({
       data: {
         name: data.name,
         dueDate: data.dueDate ?? null,
-        priority: data.priority ?? null,
-        status: data.status ?? null,
         id_dt_task: taskId,
+        rank: newRank,
       },
     });
   }
 
-  async updateTaskDetail(detailId: string, data: UpdateTaskDetailRequest): Promise<DT_TASK_DETAIL> {
-    const detail = await this.prismaService.dT_TASK_DETAIL.findUnique({ where: { id: detailId } });
-    if (!detail) throw new NotFoundException(`Task detail ${detailId} not found`);
+  async updateSubTask(subtaskId: string, data: UpdateSubTaskRequest): Promise<DT_SUB_TASK> {
+    const subtask = await this.prismaService.dT_SUB_TASK.findUnique({
+      where: { id: subtaskId },
+    });
+    if (!subtask) throw new NotFoundException(`Subtask ${subtaskId} not found`);
 
-    return this.prismaService.dT_TASK_DETAIL.update({
-      where: { id: detailId },
+    return this.prismaService.dT_SUB_TASK.update({
+      where: { id: subtaskId },
       data: {
         ...(data.name !== undefined && { name: data.name }),
         ...(data.dueDate !== undefined && { dueDate: data.dueDate }),
-        ...(data.priority !== undefined && { priority: data.priority }),
         ...(data.status !== undefined && { status: data.status }),
       },
     });
   }
 
-  async deleteTaskDetail(detailId: string): Promise<{ message: string }> {
-    const exist = await this.prismaService.dT_TASK_DETAIL.findUnique({ where: { id: detailId } });
-    if (!exist) throw new NotFoundException(`Task detail ${detailId} not found`);
+  async deleteSubTask(subtaskId: string): Promise<{ message: string }> {
+    const exist = await this.prismaService.dT_SUB_TASK.findUnique({
+      where: { id: subtaskId },
+    });
+    if (!exist) throw new NotFoundException(`Subtask ${subtaskId} not found`);
 
-    await this.prismaService.dT_TASK_DETAIL.delete({ where: { id: detailId } });
-    return { message: 'Task detail deleted successfully' };
+    await this.prismaService.dT_SUB_TASK.delete({ where: { id: subtaskId } });
+    return { message: 'Subtask deleted successfully' };
+  }
+
+  async moveSubTask(
+    subtaskId: string,
+    body: { beforeId?: string | null; afterId?: string | null },
+  ): Promise<DT_SUB_TASK> {
+    const sid = this.normalizeGuid(subtaskId);
+    if (!sid) throw new BadRequestException('Invalid subtaskId');
+
+    const subtask = await this.prismaService.dT_SUB_TASK.findUnique({
+      where: { id: sid },
+      select: { id: true, id_dt_task: true, rank: true },
+    });
+    if (!subtask) throw new NotFoundException(`Subtask ${sid} not found`);
+    const tid = subtask.id_dt_task;
+    if (!tid) throw new BadRequestException(`Subtask ${sid} has no parent task`);
+
+    const beforeIdRaw = this.normalizeGuid(body.beforeId ?? null);
+    const afterIdRaw = this.normalizeGuid(body.afterId ?? null);
+    const beforeId = beforeIdRaw === sid ? null : beforeIdRaw;
+    const afterId = afterIdRaw === sid ? null : afterIdRaw;
+
+    const fetchNeighbor = async (nid: string | null) => {
+      if (!nid) return null;
+      const n = await this.prismaService.dT_SUB_TASK.findUnique({
+        where: { id: nid },
+        select: { id: true, id_dt_task: true, rank: true },
+      });
+      return !n || n.id_dt_task !== tid ? null : n;
+    };
+
+    const [before, after] = await Promise.all([fetchNeighbor(beforeId), fetchNeighbor(afterId)]);
+
+    const computeNewRank = async (): Promise<string> => {
+      // ✅ Both neighbors (before = di atas, after = di bawah)
+      if (before && after) {
+        return this.rankBetween(before.rank ?? null, after.rank ?? null);
+      }
+
+      // ✅ Only before → taruh TEPAT di bawah 'before'
+      if (before && !after) {
+        const nextBelow = await this.prismaService.dT_SUB_TASK.findFirst({
+          where: { id_dt_task: tid, rank: { gt: before.rank ?? undefined } }, // bawah = lebih besar
+          orderBy: { rank: 'asc' }, // paling dekat di bawah
+          select: { rank: true },
+        });
+        return this.rankBetween(before.rank ?? null, nextBelow?.rank ?? null);
+      }
+
+      // ✅ Only after → taruh TEPAT di atas 'after'
+      if (!before && after) {
+        const prevAbove = await this.prismaService.dT_SUB_TASK.findFirst({
+          where: { id_dt_task: tid, rank: { lt: after.rank ?? undefined } }, // atas = lebih kecil
+          orderBy: { rank: 'desc' }, // paling dekat di atas
+          select: { rank: true },
+        });
+        return this.rankBetween(prevAbove?.rank ?? null, after.rank ?? null);
+      }
+
+      // ✅ Tanpa neighbors → append PALING BAWAH
+      const max = await this.prismaService.dT_SUB_TASK.findFirst({
+        where: { id_dt_task: tid },
+        orderBy: { rank: 'desc' }, // terbesar = paling bawah (ASC)
+        select: { rank: true },
+      });
+      return this.rankAfter(max?.rank ?? null);
+    };
+    const MAX_RETRY = 3;
+    for (let attempt = 1; attempt <= MAX_RETRY; attempt++) {
+      try {
+        const newRank = await computeNewRank();
+
+        if (subtask.rank === newRank) {
+          const current = await this.prismaService.dT_SUB_TASK.findUnique({ where: { id: sid } });
+          if (!current) throw new NotFoundException(`Subtask ${sid} not found after lookup`);
+          return current;
+        }
+
+        return await this.prismaService.dT_SUB_TASK.update({
+          where: { id: sid },
+          data: { rank: newRank },
+        });
+      } catch (e: any) {
+        if (this.isUniqueConstraintError(e) && attempt < MAX_RETRY) continue;
+        throw e;
+      }
+    }
+    throw new BadRequestException('Unable to move subtask');
   }
 
   // =========================================================
@@ -318,11 +447,12 @@ export class ProjectService {
     status: boolean;
     assignees: { nik: string; name: string; assignedAt: Date }[];
     creator: { nama: string } | null;
+    subTask?: SubTask[];
   }): TaskNonSection {
     return {
       id: t.id,
       name: t.name,
-      desc: t.desc,
+      desc: t.desc ?? '',
       dueDate: t.dueDate ?? null,
       status: Boolean(t.status),
       assignees: (t.assignees ?? []).map((a) => ({
@@ -331,24 +461,62 @@ export class ProjectService {
         assignedAt: a.assignedAt,
       })),
       creator: { nama: t.creator?.nama ?? '' },
+      subTask: t.subTask ?? [],
     };
   }
 
-  async findTasksAndSections(projectId: string): Promise<TaskSectionResponse> {
-    const [unlocatedTasks, sections] = await Promise.all([
-      this.prismaService.dT_TASK.findMany({
-        where: { id_dt_project: projectId, id_dt_section: null },
+  private get taskSelect() {
+    return {
+      id: true,
+      name: true,
+      desc: true,
+      dueDate: true,
+      status: true,
+      assignees: {
+        select: {
+          nik: true,
+          name: true,
+          assignedAt: true,
+        },
+      },
+      creator: {
+        select: {
+          nama: true,
+        },
+      },
+      subTask: {
         select: {
           id: true,
           name: true,
           dueDate: true,
-          desc: true,
           status: true,
-          assignees: { select: { nik: true, name: true, assignedAt: true } },
-          creator: { select: { nama: true } },
+          rank: true,
+          id_dt_task: true,
+          createdAt: true,
+          assignees: {
+            select: {
+              nik: true,
+              name: true,
+              assignedAt: true,
+            },
+          },
         },
-        orderBy: [{ rank: 'asc' }, { id: 'asc' }],
+        orderBy: { rank: 'asc' as const },
+      },
+    };
+  }
+
+  /** 🔹 Ambil semua task & section dengan struktur terformat */
+  async findTasksAndSections(projectId: string): Promise<TaskSectionResponse> {
+    const [unlocatedTasks, sections] = await Promise.all([
+      // Task tanpa section
+      this.prismaService.dT_TASK.findMany({
+        where: { id_dt_project: projectId, id_dt_section: null },
+        select: this.taskSelect,
+        orderBy: [{ rank: 'asc' }],
       }),
+
+      // Semua section beserta tasks dan subtasks
       this.prismaService.dT_SECTION.findMany({
         where: { id_dt_project: projectId },
         select: {
@@ -356,16 +524,8 @@ export class ProjectService {
           name: true,
           rank: true,
           tasks: {
-            select: {
-              id: true,
-              name: true,
-              desc: true,
-              dueDate: true,
-              status: true,
-              assignees: { select: { nik: true, name: true, assignedAt: true } },
-              creator: { select: { nama: true } },
-            },
-            orderBy: [{ rank: 'asc' }, { id: 'asc' }],
+            select: this.taskSelect,
+            orderBy: [{ rank: 'asc' }],
           },
         },
         orderBy: { rank: 'asc' },
@@ -376,6 +536,7 @@ export class ProjectService {
       throw new NotFoundException(`No tasks found in project ${projectId}`);
     }
 
+    // 🔹 Build response terstruktur
     return {
       unlocated: unlocatedTasks.map((t) => this.mapTask(t)),
       sections: sections.map((s) => ({
@@ -424,6 +585,35 @@ export class ProjectService {
       where: { id: sectionId },
       data: { name: name },
     });
+  }
+
+  async removeSection({ projectId, sectionId, includeTask }: RemoveSectionArgs): Promise<string> {
+    await this.prismaService.$transaction(async (tx) => {
+      const sec = await tx.dT_SECTION.findFirst({
+        where: { id: sectionId, id_dt_project: projectId },
+        select: { id: true },
+      });
+
+      if (!sec) {
+        throw new Error('Section tidak ditemukan untuk project tersebut');
+      }
+
+      if (includeTask) {
+        await tx.dT_TASK.deleteMany({
+          where: { id_dt_section: sectionId, id_dt_project: projectId },
+        });
+      } else {
+        await tx.dT_TASK.updateMany({
+          where: { id_dt_section: sectionId, id_dt_project: projectId },
+          data: { id_dt_section: null },
+        });
+      }
+      await tx.dT_SECTION.delete({
+        where: { id: sectionId },
+      });
+    });
+
+    return 'Delete Section Successfully';
   }
 
   async moveSection(

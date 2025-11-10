@@ -12,7 +12,7 @@ import {
   ValidateIf,
   ValidateNested,
 } from 'class-validator';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 
 // =========================================================
 // 🔹 PROJECT DTO
@@ -30,7 +30,7 @@ export class CreateProjectRequest {
 }
 
 // =========================================================
-// 🔹 TASK DTO
+// TASK DTO
 // =========================================================
 export class CreateTaskProjectRequest {
   @IsString()
@@ -44,7 +44,11 @@ export class CreateTaskProjectRequest {
   @MaxLength(64)
   tag?: string;
 
-  // bebas: id/slug section (opsional). Jika ini UUID, ganti ke @IsUUID()
+  @IsString()
+  @IsOptional()
+  @MaxLength(64)
+  desc?: string;
+
   @IsString()
   @IsOptional()
   @MaxLength(100)
@@ -52,18 +56,49 @@ export class CreateTaskProjectRequest {
 }
 
 // =========================================================
-/**
- * 🔹 UPDATE TASK DTO
- * - id_dt_section boleh null/undefined; jika ada nilai → harus UUID
- * - tagNames bisa string tunggal, array, atau CSV → di-normalisasi ke string[]
- * - updatedBy DIHAPUS: ambil dari auth (req.user / client.user)
- // =========================================================
- */
+// SECTION DTO
+// =========================================================
+
+export class RemoveSectionParamsDto {
+  @IsUUID()
+  @IsNotEmpty()
+  projectId!: string;
+
+  @IsUUID()
+  @IsNotEmpty()
+  sectionId!: string;
+}
+
+export class RemoveSectionQueryDto {
+  @IsOptional()
+  @Transform(({ value }) => {
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'number') return value === 1;
+    if (typeof value === 'string') {
+      const v = value.toLowerCase().trim();
+      if (v === 'true' || v === '1') return true;
+      if (v === 'false' || v === '0' || v === '') return false;
+    }
+    return false;
+  })
+  @IsBoolean()
+  includeTask?: boolean = false;
+}
+
+export type RemoveSectionArgs = {
+  projectId: string;
+  sectionId: string;
+  includeTask: boolean;
+};
+
+//  =========================================================
+//  UPDATE TASK DTO
+//  =========================================================
 
 class AssigneeDto {
   @IsString()
-  @MinLength(9)
-  @MaxLength(9)
+  @MinLength(8)
+  @MaxLength(8)
   nik: string;
 
   @IsString()
@@ -97,39 +132,23 @@ export class UpdateTaskRequest {
 }
 
 // =========================================================
-// 🔹 TASK DETAIL DTO
-// Catatan: IsDateString → field harus string ISO (YYYY-MM-DD atau full ISO).
-// Jika ingin menerima null: pakai ValidateIf untuk skip validasi pada null.
+// TASK DETAIL DTO
 // =========================================================
-export class AddTaskDetailRequest {
-  @IsUUID()
-  taskId!: string;
-
+export class AddSubTaskRequest {
   @IsString()
   @IsNotEmpty()
   @MaxLength(255)
   name!: string;
 
-  @ValidateIf((_, v) => v !== null && v !== undefined)
-  @IsDateString()
   @IsOptional()
+  @IsISO8601()
   dueDate?: string | null;
-
-  @IsString()
-  @IsOptional()
-  @MaxLength(32)
-  priority?: string | null;
-
-  @IsString()
-  @IsOptional()
-  @MaxLength(32)
-  status?: string | null;
 }
 
-export class UpdateTaskDetailRequest {
+export class UpdateSubTaskRequest {
   @IsUUID()
   @IsOptional()
-  taskId?: string;
+  taskId: string;
 
   @IsString()
   @IsOptional()
@@ -140,13 +159,7 @@ export class UpdateTaskDetailRequest {
   @IsISO8601()
   dueDate?: string;
 
-  @IsString()
+  @IsBoolean()
   @IsOptional()
-  @MaxLength(32)
-  priority?: string | null;
-
-  @IsString()
-  @IsOptional()
-  @MaxLength(32)
-  status?: string | null;
+  status?: boolean;
 }
