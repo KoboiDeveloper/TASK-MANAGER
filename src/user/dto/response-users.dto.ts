@@ -9,3 +9,8 @@ export class ResponseListUsersDto {
   accessRegionIds: { regionId: string }[];
   accessStoreIds: { storeId: string }[];
 }
+
+export class ResponseUserContains {
+  nik: string;
+  nama: string;
+}

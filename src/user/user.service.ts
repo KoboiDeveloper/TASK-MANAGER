@@ -1,4 +1,9 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { DT_USER, Prisma } from '@prisma/client';
 import { ERole } from '../constant/ERole';
@@ -9,7 +14,7 @@ import { RegisterResponse } from '../auth/dto/response/registerResponse';
 import { comparePassword, encodePassword } from '../utils/bcrypt';
 import { RequestUpdateUser } from './dto/request/requestUpdateUser';
 import { ConfigService } from '@nestjs/config';
-import { ResponseListUsersDto } from './dto/response-users.dto';
+import { ResponseListUsersDto, ResponseUserContains } from './dto/response-users.dto';
 
 interface IuserService {
   create(data: RegisterRequest): Promise<RegisterResponse>;
@@ -209,6 +214,25 @@ export class UserService implements IuserService {
     const user = await this.prismaService.dT_USER.findUnique({ where: { nik } });
     if (!user) throw new NotFoundException('User tidak ditemukan');
     return user;
+  }
+
+  async findContains(nik: string): Promise<ResponseUserContains[]> {
+    const user = await this.prismaService.dT_USER.findMany({
+      where: {
+        nik: { contains: nik },
+      },
+    });
+    if (!user) throw new NotFoundException('User tidak ditemukan');
+    return user;
+  }
+  async findManyByNik(data: { nik: string }[]): Promise<DT_USER[]> {
+    const nikList = [...new Set((data ?? []).map((d) => d?.nik).filter((v): v is string => !!v))];
+
+    if (nikList.length === 0) return [];
+
+    return this.prismaService.dT_USER.findMany({
+      where: { nik: { in: nikList } },
+    });
   }
 
   //helper

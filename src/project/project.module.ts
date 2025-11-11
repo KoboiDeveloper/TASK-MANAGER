@@ -1,15 +1,16 @@
 // src/project/project.module.ts
 import { Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
-import { EventEmitterModule } from '@nestjs/event-emitter';
 import { ProjectController } from './project.controller';
 import { ProjectService } from './project.service';
-import { PrismaService } from '../prisma/prisma.service';
+import { UserModule } from '../user/user.module';
+import { MailModule } from '../utils/mail/mail.module';
+import { PrismaModule } from '../prisma/prisma.module'; // ← buat modul global/utility utk PrismaService
 
 @Module({
-  imports: [JwtModule.register({}), EventEmitterModule.forRoot()],
+  imports: [JwtModule.register({}), PrismaModule, UserModule, MailModule],
   controllers: [ProjectController],
-  providers: [ProjectService, PrismaService],
+  providers: [ProjectService],
   exports: [ProjectService],
 })
 export class ProjectModule {}

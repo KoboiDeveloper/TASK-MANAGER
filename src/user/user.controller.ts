@@ -6,7 +6,8 @@ import {
   HttpStatus,
   Param,
   Patch,
-  Post, Res,
+  Post,
+  Res,
   UseGuards,
 } from '@nestjs/common';
 import { UserService } from './user.service';
@@ -16,8 +17,7 @@ import { AuthGuard } from '../security/authGuard';
 import { Roles } from '../security/roles.decorator';
 import { RegisterRequest } from './dto/request/registerRequest';
 import { RequestUpdateUser } from './dto/request/requestUpdateUser';
-import { ResponseListUsersDto } from './dto/response-users.dto';
-import { Own } from '../security/own.decorator';
+import { ResponseListUsersDto, ResponseUserContains } from './dto/response-users.dto';
 import { ChangePasswordDto } from './dto/request/requestChangePassword';
 import { OwnerGuard } from '../security/own-guard';
 import { Response } from 'express';
@@ -31,6 +31,16 @@ export class UserController {
   async findAll() {
     try {
       const userResponse: ResponseListUsersDto[] = await this.userService.findAll();
+      return new CommonResponse('Users List', HttpStatus.OK, userResponse);
+    } catch ({ message }) {
+      return handleException(message as string);
+    }
+  }
+
+  @Get('/contains/:nik')
+  async findUsersContains(@Param('nik') nik: string) {
+    try {
+      const userResponse: ResponseUserContains[] = await this.userService.findContains(nik);
       return new CommonResponse('Users List', HttpStatus.OK, userResponse);
     } catch ({ message }) {
       return handleException(message as string);

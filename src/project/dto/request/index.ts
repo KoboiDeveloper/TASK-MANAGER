@@ -1,7 +1,7 @@
 import {
   IsArray,
   IsBoolean,
-  IsDateString,
+  IsEnum,
   IsISO8601,
   IsNotEmpty,
   IsOptional,
@@ -9,10 +9,10 @@ import {
   IsUUID,
   MaxLength,
   MinLength,
-  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 import { Transform, Type } from 'class-transformer';
+import { EProjectRole } from '../../../constant/EProjectRole';
 
 // =========================================================
 // 🔹 PROJECT DTO
@@ -24,9 +24,28 @@ export class CreateProjectRequest {
   name!: string;
 
   @IsString()
-  @IsNotEmpty()
+  @IsOptional()
   @MaxLength(500)
-  desc!: string;
+  desc?: string;
+
+  @IsOptional()
+  members?: Member[];
+}
+
+export class Member {
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(9)
+  nik!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(9)
+  nama!: string;
+
+  @IsEnum(EProjectRole)
+  @IsNotEmpty()
+  roleId!: EProjectRole;
 }
 
 // =========================================================
@@ -38,21 +57,10 @@ export class CreateTaskProjectRequest {
   @MaxLength(255)
   name!: string;
 
-  // bebas: nama tag pertama (opsional)
-  @IsString()
-  @IsOptional()
-  @MaxLength(64)
-  tag?: string;
-
   @IsString()
   @IsOptional()
   @MaxLength(64)
   desc?: string;
-
-  @IsString()
-  @IsOptional()
-  @MaxLength(100)
-  section?: string;
 }
 
 // =========================================================

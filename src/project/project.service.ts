@@ -1,9 +1,9 @@
 import {
-  Injectable,
-  NotFoundException,
-  ConflictException,
-  Logger,
   BadRequestException,
+  ConflictException,
+  Injectable,
+  Logger,
+  NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import {
@@ -14,8 +14,7 @@ import {
   UpdateSubTaskRequest,
   UpdateTaskRequest,
 } from './dto/request';
-import { EProjectRole } from '../constant/EProjectRole';
-import { DT_PROJECT, DT_SECTION, DT_TAG, DT_TASK, DT_SUB_TASK, Prisma } from '@prisma/client';
+import { DT_PROJECT, DT_SECTION, DT_SUB_TASK, DT_TAG, DT_TASK, Prisma } from '@prisma/client';
 import {
   ProjectDetail,
   ProjectMemberFlat,
@@ -23,12 +22,19 @@ import {
   TaskNonSection,
   TaskSectionResponse,
 } from './dto/response';
+import { UserService } from '../user/user.service';
+import { MailService } from '../utils/mail/mail.service';
+import { EProjectRole } from '../constant/EProjectRole';
 
 @Injectable()
 export class ProjectService {
   private readonly logger = new Logger(ProjectService.name);
 
-  constructor(private readonly prismaService: PrismaService) {}
+  constructor(
+    private readonly prismaService: PrismaService,
+    private readonly userService: UserService,
+    private readonly mailService: MailService,
+  ) {}
   // =========================================================
   // 🔹 PROJECT MANAGEMENT
   // =========================================================
@@ -48,19 +54,59 @@ export class ProjectService {
     return this.ensureProjectExists(projectId);
   }
 
-  async create(nik: string, data: CreateProjectRequest): Promise<string> {
-    const { name, desc } = data;
+  async create(creatorNik: string, data: CreateProjectRequest): Promise<string> {
+    const { name, desc = null, members = [] } = data;
     const color = this.generateColorFromString(name);
 
-    return this.prismaService.$transaction(async (tx) => {
+    // ⬇️ hanya baris ini yang diubah: simpan hasil transaksi ke projectId
+    const projectId = await this.prismaService.$transaction(async (tx) => {
       const project = await tx.dT_PROJECT.create({
-        data: { name, color, desc, createdBy: nik },
+        data: { name, color, desc, createdBy: creatorNik },
       });
+
       await tx.dT_MEMBER_PROJECT.create({
-        data: { projectId: project.id, nik, id_dt_project_role: EProjectRole.OWNER },
+        data: {
+          projectId: project.id,
+          nik: creatorNik,
+          id_dt_project_role: EProjectRole.OWNER,
+        },
       });
+
+      await this.addMembersToProject(project.id, members, tx);
+
       return project.id;
     });
+
+    // === Kirim email setelah commit (tidak mempengaruhi transaksi) ===
+    try {
+      const memberNiks = [
+        ...new Set(
+          (members ?? []).map((m) => m?.nik).filter((n): n is string => !!n && n !== creatorNik),
+        ),
+      ];
+
+      if (memberNiks.length) {
+        const users = await this.userService.findManyByNik(memberNiks.map((nik) => ({ nik })));
+        const recipients = users.map((u) => u?.email).filter(Boolean);
+
+        if (recipients.length) {
+          for (const u of users) {
+            if (!u?.email) continue;
+            const role = 'READ' as 'OWNER' | 'EDITOR' | 'READ';
+            await this.mailService.sendProjectJoinedEmail({
+              to: u.email,
+              projectId,
+              projectName: name,
+              role,
+            });
+          }
+        }
+      }
+    } catch (err) {
+      this.logger?.warn?.(`sendProjectJoinedEmail failed: ${String(err)}`);
+    }
+
+    return projectId;
   }
 
   // =========================================================
@@ -72,16 +118,9 @@ export class ProjectService {
     nik: string,
     data: CreateTaskProjectRequest,
   ): Promise<string> {
-    const { name, section, tag, desc } = data;
+    const { name, desc } = data;
 
     await this.ensureProjectExists(projectId);
-
-    const sectionIdNorm = this.normalizeGuid(section ?? null);
-    const sectionEntity = sectionIdNorm
-      ? await this.ensureSectionExists(projectId, sectionIdNorm)
-      : null;
-
-    const tagEntity = tag ? await this.ensureTagExists(projectId, tag) : null;
 
     const task = await this.prismaService.dT_TASK.create({
       data: {
@@ -89,8 +128,6 @@ export class ProjectService {
         desc,
         id_dt_project: projectId,
         createdBy: nik,
-        id_dt_section: sectionEntity?.id ?? null,
-        ...(tagEntity && { tags: { connect: [{ id: tagEntity.id }] } }),
       },
     });
 
@@ -509,14 +546,11 @@ export class ProjectService {
   /** 🔹 Ambil semua task & section dengan struktur terformat */
   async findTasksAndSections(projectId: string): Promise<TaskSectionResponse> {
     const [unlocatedTasks, sections] = await Promise.all([
-      // Task tanpa section
       this.prismaService.dT_TASK.findMany({
         where: { id_dt_project: projectId, id_dt_section: null },
         select: this.taskSelect,
         orderBy: [{ rank: 'asc' }],
       }),
-
-      // Semua section beserta tasks dan subtasks
       this.prismaService.dT_SECTION.findMany({
         where: { id_dt_project: projectId },
         select: {
@@ -531,12 +565,6 @@ export class ProjectService {
         orderBy: { rank: 'asc' },
       }),
     ]);
-
-    if (unlocatedTasks.length === 0 && sections.length === 0) {
-      throw new NotFoundException(`No tasks found in project ${projectId}`);
-    }
-
-    // 🔹 Build response terstruktur
     return {
       unlocated: unlocatedTasks.map((t) => this.mapTask(t)),
       sections: sections.map((s) => ({
@@ -784,16 +812,6 @@ export class ProjectService {
     return section;
   }
 
-  private async ensureTagExists(projectId: string, tagName: string): Promise<DT_TAG> {
-    const tag = await this.prismaService.dT_TAG.findFirst({
-      where: { id_dt_project: projectId, name: tagName },
-    });
-    if (tag) return tag;
-    return this.prismaService.dT_TAG.create({
-      data: { name: tagName, id_dt_project: projectId },
-    });
-  }
-
   private isUniqueConstraintError(err: unknown): boolean {
     return Boolean(
       typeof err === 'object' &&
@@ -801,5 +819,46 @@ export class ProjectService {
         'code' in err &&
         (err as { code?: string }).code === 'P2002',
     );
+  }
+
+  private async addMembersToProject(
+    projectId: string,
+    members: Array<{ nik: string; roleId?: string | EProjectRole | null }>,
+    tx: Prisma.TransactionClient = this.prismaService,
+  ): Promise<void> {
+    const roleMap = new Map<string, EProjectRole>([
+      ['OWNER', EProjectRole.OWNER],
+      ['EDITOR', EProjectRole.EDITOR],
+      ['READ', EProjectRole.READ],
+    ]);
+
+    const nikToRole = new Map<string, EProjectRole>();
+    for (const m of members ?? []) {
+      const nik = m?.nik?.trim();
+      const key = String(m?.roleId ?? 'READ').toUpperCase();
+      nikToRole.set(nik, roleMap.get(key) ?? EProjectRole.READ);
+    }
+    if (!nikToRole.size) return;
+
+    const nikList = [...nikToRole.keys()];
+
+    const existing = await tx.dT_MEMBER_PROJECT.findMany({
+      where: { projectId, nik: { in: nikList } },
+      select: { nik: true },
+    });
+    const existingNik = new Set(existing.map((e) => e.nik));
+
+    const rows = nikList
+      .filter((nik) => !existingNik.has(nik))
+      .map((nik) => ({
+        projectId,
+        nik,
+        id_dt_project_role: nikToRole.get(nik)!,
+      }));
+    if (!rows.length) return;
+
+    await tx.dT_MEMBER_PROJECT.createMany({
+      data: rows,
+    });
   }
 }
