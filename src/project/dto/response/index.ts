@@ -15,8 +15,7 @@ export type ProjectDetail = {
 };
 type Assignees = {
   nik: string;
-  name: string;
-  assignedAt: Date;
+  nama: string;
 };
 export type SubTask = {
   id: string;
@@ -24,6 +23,14 @@ export type SubTask = {
   dueDate: Date | null;
   status: boolean;
   assignees: Assignees[];
+};
+
+export type AttachmentTask = {
+  id: string;
+  taskId: string | null;
+  url: string;
+  filename: string;
+  mimeType: string;
 };
 
 export type TaskNonSection = {

@@ -13,6 +13,8 @@ import {
   UseGuards,
   Patch,
   Query,
+  UseInterceptors,
+  UploadedFiles,
 } from '@nestjs/common';
 import { Request } from 'express';
 import { ProjectService } from './project.service';
@@ -20,8 +22,11 @@ import {
   AddSubTaskRequest,
   CreateProjectRequest,
   CreateTaskProjectRequest,
+  MemberRequest,
   RemoveSectionParamsDto,
   RemoveSectionQueryDto,
+  SyncSubTaskAssigneeRequest,
+  UpdateProjectRequest,
   UpdateSubTaskRequest,
   UpdateTaskRequest,
 } from './dto/request';
@@ -31,6 +36,8 @@ import { ProjectRoles } from '../security/project-roles.decorator';
 import { EProjectRole } from '../constant/EProjectRole';
 import { CommonResponse } from '../common/commonResponse';
 import { handleException } from '../utils/handleException';
+import { AllowArchivedProject } from '../security/AllowArchivedProject.decorator';
+import { FilesInterceptor } from '@nestjs/platform-express';
 
 type AuthUser = {
   nik: string;
@@ -48,9 +55,10 @@ export class ProjectController {
   // =========================================================
 
   @Get()
-  async getOwnProjects(@Req() req: Request & { user?: Pick<AuthUser, 'nik'> }) {
+  async getOwnProjects(@Req() req: Request & { user?: Pick<AuthUser, 'nik' | 'roleId'> }) {
     try {
-      const data = await this.projectService.ownProjects(req.user!.nik);
+      const roleId = req.user?.roleId ? String(req.user.roleId) : undefined;
+      const data = await this.projectService.ownProjects(req.user!.nik, roleId);
       return new CommonResponse('Get Own projects success', HttpStatus.OK, data);
     } catch ({ message }) {
       return handleException(message as string);
@@ -81,6 +89,51 @@ export class ProjectController {
     }
   }
 
+  @Patch(':projectId/update')
+  @AllowArchivedProject()
+  @UseGuards(ProjectMemberGuard)
+  @ProjectRoles(EProjectRole.OWNER)
+  async updateProject(
+    @Param('projectId', ParseUUIDPipe) projectId: string,
+    @Body() body: UpdateProjectRequest,
+  ) {
+    const updateResponse: string = await this.projectService.updateProjectById(projectId, body);
+    return new CommonResponse('Project updated successfully', HttpStatus.OK, updateResponse);
+  }
+
+  @Delete('/:projectId/delete')
+  @AllowArchivedProject()
+  @UseGuards(ProjectMemberGuard)
+  @ProjectRoles(EProjectRole.OWNER)
+  async deleteProject(@Param('projectId', ParseUUIDPipe) projectId: string) {
+    try {
+      const deleteProject = await this.projectService.deleteProjectById(projectId);
+      return new CommonResponse('Project deleted successfully', HttpStatus.OK, deleteProject);
+    } catch ({ message }) {
+      return handleException(message as string);
+    }
+  }
+
+  // =========================================================
+  // 🔹 MEMBER MANAGEMENT
+  // =========================================================
+
+  @Patch(':projectId/members')
+  @UseGuards(ProjectMemberGuard)
+  @ProjectRoles(EProjectRole.OWNER)
+  async syncProjectMembers(
+    @Param('projectId', ParseUUIDPipe) projectId: string,
+    @Body() body: { members: MemberRequest[] },
+  ): Promise<CommonResponse<{ nik: string; nama: string }[] | null>> {
+    try {
+      const finalMembers = await this.projectService.syncProjectMembers(projectId, body.members);
+
+      return new CommonResponse('Project members synced successfully', HttpStatus.OK, finalMembers);
+    } catch ({ message }) {
+      return handleException(message as string);
+    }
+  }
+
   // =========================================================
   // 🔹 TASK MANAGEMENT
   // =========================================================
@@ -93,7 +146,6 @@ export class ProjectController {
     @Param('taskId', ParseUUIDPipe) taskId: string,
     @Body()
     body: {
-      // semua opsional agar reorder in-place bisa terdeteksi di service
       targetSectionId?: string | null;
       beforeId?: string | null;
       afterId?: string | null;
@@ -143,6 +195,55 @@ export class ProjectController {
     }
   }
 
+  // ====== UPLOAD / TAMBAH ATTACHMENT KE TASK ======
+  @Post('tasks/:taskId/attachments')
+  @ProjectRoles(EProjectRole.OWNER, EProjectRole.EDITOR)
+  @UseInterceptors(FilesInterceptor('attachments', 10)) // field name: attachments
+  async uploadTaskAttachments(
+    @Param('taskId') taskId: string,
+    @UploadedFiles() attachments: Express.Multer.File[],
+  ) {
+    try {
+      const message = await this.projectService.AddTaskAttachments(taskId, attachments);
+      return new CommonResponse(message || 'Attachments uploaded successfully', HttpStatus.OK, {
+        taskId,
+        count: attachments?.length ?? 0,
+      });
+    } catch ({ message }) {
+      return handleException(message as string);
+    }
+  }
+
+  @Get('tasks/:taskId/attachments')
+  async getTaskAttachments(@Param('taskId', new ParseUUIDPipe()) taskId: string) {
+    try {
+      const attachmentsTask = await this.projectService.getTaskAttachments(taskId);
+      return new CommonResponse(
+        'get Attachment by TaskId Successfully',
+        HttpStatus.OK,
+        attachmentsTask,
+      );
+    } catch ({ message }) {
+      return handleException(message as string);
+    }
+  }
+
+  // ====== DELETE ATTACHMENT BULK DARI TASK ======
+  @Delete('tasks/:taskId/attachments')
+  @ProjectRoles(EProjectRole.OWNER, EProjectRole.EDITOR)
+  async deleteTaskAttachments(@Param('taskId') taskId: string, @Body() body: { id: string[] }) {
+    try {
+      const message = await this.projectService.deleteTaskAttachments(taskId, body.id);
+
+      return new CommonResponse(message || 'Attachments deleted successfully', HttpStatus.OK, {
+        taskId,
+        deletedIds: body.id,
+      });
+    } catch ({ message }) {
+      return handleException(message as string);
+    }
+  }
+
   @Patch('task/:taskId')
   @UseGuards(ProjectMemberGuard)
   async updateTask(
@@ -158,6 +259,18 @@ export class ProjectController {
       return handleException(message as string);
     }
   }
+
+  @Delete('tasks/:taskId/delete')
+  @ProjectRoles(EProjectRole.OWNER, EProjectRole.EDITOR)
+  async deleteTask(@Param('taskId', ParseUUIDPipe) taskId: string) {
+    try {
+      const deleteTask = await this.projectService.deleteTaskId(taskId);
+      return new CommonResponse('Task delete successfully', HttpStatus.OK, deleteTask);
+    } catch ({ message }) {
+      return handleException(message as string);
+    }
+  }
+
   // =========================================================
   // 🔹 TASK DETAIL MANAGEMENT
   // =========================================================
@@ -195,6 +308,28 @@ export class ProjectController {
   ) {
     const updated = await this.projectService.moveSubTask(subtaskId, body);
     return new CommonResponse('Subtask moved successfully', HttpStatus.OK, updated);
+  }
+
+  @Patch('tasks/:taskId/subtasks/:subTaskId/assignees')
+  async syncSubTaskAssignees(
+    @Param('taskId') taskId: string,
+    @Param('subTaskId') subTaskId: string,
+    @Body() body: SyncSubTaskAssigneeRequest,
+  ): Promise<CommonResponse<string | null>> {
+    try {
+      const syncSubTaskAssignees = await this.projectService.syncSubTaskAssignees(
+        taskId,
+        subTaskId,
+        body,
+      );
+      return new CommonResponse(
+        'Sync Assignee subtask successfully',
+        HttpStatus.OK,
+        syncSubTaskAssignees,
+      );
+    } catch ({ message }) {
+      return handleException(message as string);
+    }
   }
 
   // =========================================================

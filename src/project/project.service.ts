@@ -10,7 +10,10 @@ import {
   AddSubTaskRequest,
   CreateProjectRequest,
   CreateTaskProjectRequest,
+  MemberRequest,
   RemoveSectionArgs,
+  SyncSubTaskAssigneeRequest,
+  UpdateProjectRequest,
   UpdateSubTaskRequest,
   UpdateTaskRequest,
 } from './dto/request';
@@ -21,11 +24,12 @@ import {
   SubTask,
   TaskNonSection,
   TaskSectionResponse,
+  AttachmentTask,
 } from './dto/response';
 import { UserService } from '../user/user.service';
 import { MailService } from '../utils/mail/mail.service';
 import { EProjectRole } from '../constant/EProjectRole';
-
+import { del, put } from '@vercel/blob';
 @Injectable()
 export class ProjectService {
   private readonly logger = new Logger(ProjectService.name);
@@ -35,11 +39,17 @@ export class ProjectService {
     private readonly userService: UserService,
     private readonly mailService: MailService,
   ) {}
+
   // =========================================================
   // 🔹 PROJECT MANAGEMENT
   // =========================================================
 
-  async ownProjects(nik: string): Promise<DT_PROJECT[]> {
+  async ownProjects(nik: string, roleId?: string): Promise<DT_PROJECT[]> {
+    if (roleId === 'SUPER') {
+      return this.prismaService.dT_PROJECT.findMany({
+        orderBy: { name: 'asc' },
+      });
+    }
     return this.prismaService.dT_PROJECT.findMany({
       where: {
         members: {
@@ -58,12 +68,13 @@ export class ProjectService {
     const { name, desc = null, members = [] } = data;
     const color = this.generateColorFromString(name);
 
-    // ⬇️ hanya baris ini yang diubah: simpan hasil transaksi ke projectId
+    // 1) Buat project + OWNER dalam satu transaksi
     const projectId = await this.prismaService.$transaction(async (tx) => {
       const project = await tx.dT_PROJECT.create({
         data: { name, color, desc, createdBy: creatorNik },
       });
 
+      // creator selalu jadi OWNER
       await tx.dT_MEMBER_PROJECT.create({
         data: {
           projectId: project.id,
@@ -72,41 +83,95 @@ export class ProjectService {
         },
       });
 
-      await this.addMembersToProject(project.id, members, tx);
-
+      // ❗ anggota lain TIDAK dibuat di sini, supaya semua logika diff dipegang syncProjectMembers
       return project.id;
     });
 
-    // === Kirim email setelah commit (tidak mempengaruhi transaksi) ===
-    try {
-      const memberNiks = [
-        ...new Set(
-          (members ?? []).map((m) => m?.nik).filter((n): n is string => !!n && n !== creatorNik),
-        ),
-      ];
+    // 2) Normalisasi members dari FE (tanpa OWNER/creator)
+    const normalizedMembers = this.normalizeMembersFromCreate(members, creatorNik);
 
-      if (memberNiks.length) {
-        const users = await this.userService.findManyByNik(memberNiks.map((nik) => ({ nik })));
-        const recipients = users.map((u) => u?.email).filter(Boolean);
-
-        if (recipients.length) {
-          for (const u of users) {
-            if (!u?.email) continue;
-            const role = 'READ' as 'OWNER' | 'EDITOR' | 'READ';
-            await this.mailService.sendProjectJoinedEmail({
-              to: u.email,
-              projectId,
-              projectName: name,
-              role,
-            });
-          }
-        }
+    // 3) Kalau ada anggota lain → pakai service diff global (sekalian kirim email)
+    if (normalizedMembers.length > 0) {
+      try {
+        await this.syncProjectMembers(projectId, normalizedMembers);
+      } catch (err) {
+        // Jangan jatuhkan create project hanya karena sync/email gagal
+        this.logger.warn(`syncProjectMembers after create failed: ${String(err)}`);
       }
-    } catch (err) {
-      this.logger?.warn?.(`sendProjectJoinedEmail failed: ${String(err)}`);
     }
 
     return projectId;
+  }
+
+  async updateProjectById(id: string, data: UpdateProjectRequest): Promise<string> {
+    const { name, desc, isArchive, members } = data;
+
+    try {
+      // 1) Update field project-nya (kalau ada yg dikirim)
+      if (name !== undefined || desc !== undefined || isArchive !== undefined) {
+        await this.prismaService.dT_PROJECT.update({
+          where: { id },
+          data: {
+            ...(name !== undefined ? { name } : {}),
+            ...(desc !== undefined ? { desc } : {}),
+            ...(isArchive !== undefined ? { isArchive } : {}),
+          },
+        });
+      }
+
+      // 2) Sync members kalau dikirim dari FE
+      if (Array.isArray(members)) {
+        await this.syncProjectMembers(id, members);
+      }
+
+      return `Project with ${id} successfully updated`;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to update project';
+      throw new ConflictException(message);
+    }
+  }
+
+  async deleteProjectById(id: string): Promise<string> {
+    try {
+      await this.prismaService.$transaction(async (tx) => {
+        await tx.dT_ASSIGNEE_SUBTASK.deleteMany({
+          where: {
+            subTask: {
+              task: { id_dt_project: id },
+            },
+          },
+        });
+
+        await tx.dT_ASSIGNEE_TASK.deleteMany({
+          where: {
+            task: { id_dt_project: id },
+          },
+        });
+
+        await tx.dT_SUB_TASK.deleteMany({
+          where: { task: { id_dt_project: id } },
+        });
+
+        await tx.dT_TASK.deleteMany({
+          where: { id_dt_project: id },
+        });
+
+        await tx.dT_MEMBER_PROJECT.deleteMany({
+          where: { projectId: id },
+        });
+
+        await tx.dT_PROJECT.delete({
+          where: { id },
+        });
+      });
+
+      return `Project ${id} deleted`;
+    } catch (e: unknown) {
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') {
+        throw new NotFoundException(`Project ${id} not found`);
+      }
+      throw new ConflictException('Failed to delete project');
+    }
   }
 
   // =========================================================
@@ -197,7 +262,6 @@ export class ProjectService {
             data: dto.assignees.map((a) => ({
               taskId,
               nik: a.nik,
-              name: a.name,
             })),
           });
         }
@@ -215,6 +279,194 @@ export class ProjectService {
 
     if (!updated) throw new NotFoundException(`Task ${taskId} not found after update`);
     return updated;
+  }
+
+  async deleteTaskId(taskId: string): Promise<string> {
+    try {
+      // 1) Ambil semua attachment yang terkait task ini (sebelum transaksi)
+      const attachments = await this.prismaService.dT_TASK_ATTACHMENT.findMany({
+        where: { taskId },
+        select: {
+          id: true,
+          url: true,
+        },
+      });
+
+      // 2) Jalankan transaksi untuk hapus data di DB
+      await this.prismaService.$transaction(async (tx) => {
+        await tx.dT_ASSIGNEE_SUBTASK.deleteMany({
+          where: {
+            subTask: {
+              task: { id: taskId },
+            },
+          },
+        });
+
+        await tx.dT_ASSIGNEE_TASK.deleteMany({
+          where: {
+            task: { id: taskId },
+          },
+        });
+
+        await tx.dT_TASK_ATTACHMENT.deleteMany({
+          where: {
+            taskId,
+          },
+        });
+
+        await tx.dT_SUB_TASK.deleteMany({
+          where: { task: { id: taskId } },
+        });
+
+        const deletedTask = await tx.dT_TASK.delete({
+          where: { id: taskId },
+        });
+
+        if (!deletedTask) {
+          throw new Prisma.PrismaClientKnownRequestError('Task not found', {
+            code: 'P2025',
+            clientVersion: 'unknown',
+          });
+        }
+      });
+
+      // 3) Hapus file di Vercel Blob di luar transaksi
+      await Promise.all(
+        attachments.map(async (att) => {
+          if (!att.url) return;
+          try {
+            await del(att.url);
+          } catch (err) {
+            console.error('Failed to delete blob for attachment', att.id, att.url, err);
+          }
+        }),
+      );
+
+      return `Task ${taskId} deleted`;
+    } catch (e: unknown) {
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') {
+        throw new NotFoundException(`Task ${taskId} not found`);
+      }
+      throw new ConflictException('Failed to delete task');
+    }
+  }
+
+  async AddTaskAttachments(taskId: string, attachments: Express.Multer.File[]): Promise<string> {
+    // validasi basic
+    if (!attachments || attachments.length === 0) {
+      throw new BadRequestException('No attachments uploaded');
+    }
+
+    // pastikan task ada
+    const task = await this.prismaService.dT_TASK.findUnique({
+      where: { id: taskId },
+      select: { id: true },
+    });
+
+    if (!task) {
+      throw new NotFoundException(`Task ${taskId} not found`);
+    }
+
+    // 1) Upload ke Vercel Blob dulu (di luar transaksi DB)
+    const uploadedAttachments = await Promise.all(
+      attachments.map(async (file) => {
+        const originalName = file.originalname || 'file';
+        const safeFilename = originalName.length > 20 ? originalName.slice(0, 20) : originalName; // schema: VarChar(20)
+
+        const key = `tasks/${taskId}/${Date.now()}-${Math.random().toString(36).slice(2)}-${originalName}`;
+
+        const blob = await put(key, file.buffer, {
+          access: 'public',
+          contentType: file.mimetype,
+        });
+
+        return {
+          taskId,
+          url: blob.url,
+          filename: safeFilename,
+          mimeType: file.mimetype,
+          bytes: file.size,
+        };
+      }),
+    );
+
+    await this.prismaService.dT_TASK_ATTACHMENT.createMany({
+      data: uploadedAttachments,
+    });
+
+    return `Uploaded ${uploadedAttachments.length} attachment(s) to task ${taskId}`;
+  }
+
+  async getTaskAttachments(taskId: string): Promise<AttachmentTask[]> {
+    return this.prismaService.dT_TASK_ATTACHMENT.findMany({
+      where: { taskId: taskId },
+    });
+  }
+
+  async deleteTaskAttachments(
+    taskId: string,
+    attachmentIds: Array<string | { id: string }>,
+  ): Promise<string> {
+    // 0) Normalisasi: pastikan kita punya string[]
+    const ids = attachmentIds.map((v) => (typeof v === 'string' ? v : v.id)).filter(Boolean);
+
+    // 1) Validasi basic
+    if (!ids.length) {
+      throw new BadRequestException('No attachment ids provided');
+    }
+
+    // 2) Pastikan task ada
+    const task = await this.prismaService.dT_TASK.findUnique({
+      where: { id: taskId },
+      select: { id: true },
+    });
+
+    if (!task) {
+      throw new NotFoundException(`Task ${taskId} not found`);
+    }
+
+    // 3) Ambil attachment yang match taskId + id
+    const attachments = await this.prismaService.dT_TASK_ATTACHMENT.findMany({
+      where: {
+        id: { in: ids },
+        taskId,
+      },
+    });
+
+    if (!attachments.length) {
+      throw new NotFoundException('No matching attachments found for this task');
+    }
+
+    // Cek kalau ada id yang tidak dimiliki task ini
+    const foundIds = new Set(attachments.map((a) => a.id));
+    const missing = ids.filter((id) => !foundIds.has(id));
+
+    if (missing.length > 0) {
+      throw new BadRequestException(
+        `Some attachment ids do not belong to this task: ${missing.join(', ')}`,
+      );
+    }
+
+    // 4) Hapus file dari Vercel Blob
+    await Promise.all(
+      attachments.map(async (att) => {
+        try {
+          await del(att.url);
+        } catch (err) {
+          console.error('Failed to delete blob', att.url, err);
+        }
+      }),
+    );
+
+    // 5) Hapus row di DB (bulk)
+    await this.prismaService.dT_TASK_ATTACHMENT.deleteMany({
+      where: {
+        id: { in: ids },
+        taskId,
+      },
+    });
+
+    return `Deleted ${attachments.length} attachment(s) from task ${taskId}`;
   }
 
   async moveTask(
@@ -334,6 +586,277 @@ export class ProjectService {
     });
   }
 
+  private isOwnerRole(role: EProjectRole | string): boolean {
+    return role === (EProjectRole.OWNER as string) || role === 'OWNER';
+  }
+
+  private normalizeNik(nik: string | null | undefined): string {
+    return (nik ?? '').trim();
+  }
+
+  async syncProjectMembers(
+    projectId: string,
+    members: MemberRequest[],
+  ): Promise<{ nik: string; nama: string }[]> {
+    // diff di luar tx supaya bisa dipakai kirim email setelah commit
+    const toCreate: MemberRequest[] = [];
+    const toUpdate: { newData: MemberRequest; oldRole: EProjectRole }[] = [];
+    const toDeleteNik: string[] = [];
+
+    // 🔹 normalisasi payload dulu (terutama nik)
+    const normalizedMembers: MemberRequest[] = members.map((m) => ({
+      ...m,
+      nik: this.normalizeNik(m.nik),
+    }));
+
+    const finalMembers = await this.prismaService.$transaction(async (tx) => {
+      // 1) Ambil member existing untuk project ini
+      const existingRaw = await tx.dT_MEMBER_PROJECT.findMany({
+        where: { projectId },
+        select: {
+          nik: true,
+          id_dt_project_role: true,
+          user: {
+            select: {
+              nama: true,
+              email: true,
+            },
+          },
+        },
+      });
+
+      // Ketatkan tipe + normalisasi nik
+      const existing: {
+        nik: string;
+        id_dt_project_role: EProjectRole;
+        user: { nama: string; email: string | null };
+      }[] = existingRaw.map((m) => ({
+        nik: this.normalizeNik(m.nik),
+        id_dt_project_role: m.id_dt_project_role as EProjectRole,
+        user: {
+          nama: m.user.nama,
+          email: m.user.email ?? null,
+        },
+      }));
+
+      const oldMap = new Map(existing.map((m) => [m.nik, m])); // key = nik (normalized)
+      const newMap = new Map(normalizedMembers.map((m) => [m.nik, m])); // key = nik (normalized)
+
+      // 2) Cari CREATE & UPDATE (role berubah)
+      for (const m of normalizedMembers) {
+        const old = oldMap.get(m.nik);
+
+        if (!old) {
+          // member baru
+          if (!this.isOwnerRole(m.roleId)) {
+            toCreate.push(m);
+          }
+        } else {
+          const oldRole = old.id_dt_project_role;
+          const newRole = m.roleId;
+
+          // OWNER tidak boleh diubah lewat endpoint ini
+          if (this.isOwnerRole(oldRole) || this.isOwnerRole(newRole)) {
+            continue;
+          }
+
+          if (oldRole !== newRole) {
+            toUpdate.push({
+              newData: m,
+              oldRole,
+            });
+          }
+        }
+      }
+
+      // 3) Cari DELETE → member yang ADA di DB tapi TIDAK ada di payload baru
+      for (const old of existing) {
+        const isStillInPayload = newMap.has(old.nik);
+
+        if (!isStillInPayload) {
+          // ❗ Kalau gak mau pernah hapus OWNER, bisa skip di sini
+          if (this.isOwnerRole(old.id_dt_project_role)) {
+            continue;
+          }
+
+          toDeleteNik.push(old.nik);
+        }
+      }
+
+      // 4) DELETE (hapus assignee task & subtask, baru hapus member)
+      if (toDeleteNik.length > 0) {
+        // 🔹 4a. Ambil semua task di project ini
+        const tasks = await tx.dT_TASK.findMany({
+          where: { id_dt_project: projectId },
+          select: {
+            id: true,
+          },
+        });
+        const taskIds = tasks.map((t) => t.id);
+
+        // 🔹 4b. Ambil semua subtask dari task tersebut
+        let subTaskIds: string[] = [];
+        if (taskIds.length > 0) {
+          const subTasks = await tx.dT_SUB_TASK.findMany({
+            where: { id_dt_task: { in: taskIds } },
+            select: { id: true },
+          });
+          subTaskIds = subTasks.map((st) => st.id);
+        }
+
+        // 🔹 4c. Hapus assignee task untuk nik yang dicabut
+        if (taskIds.length > 0) {
+          await tx.dT_ASSIGNEE_TASK.deleteMany({
+            where: {
+              nik: { in: toDeleteNik },
+              taskId: { in: taskIds }, // ⬅️ sesuaikan field FK kalau beda
+            },
+          });
+        }
+
+        // 🔹 4d. Hapus assignee subtask untuk nik yang dicabut
+        if (subTaskIds.length > 0) {
+          await tx.dT_ASSIGNEE_SUBTASK.deleteMany({
+            where: {
+              nik: { in: toDeleteNik },
+              subTaskId: { in: subTaskIds }, // ⬅️ ini sudah sesuai model kamu
+            },
+          });
+        }
+
+        // 🔹 4e. Terakhir, hapus membership project-nya
+        await tx.dT_MEMBER_PROJECT.deleteMany({
+          where: {
+            projectId,
+            nik: { in: toDeleteNik },
+          },
+        });
+      }
+
+      // 5) CREATE yang baru
+      if (toCreate.length > 0) {
+        await tx.dT_MEMBER_PROJECT.createMany({
+          data: toCreate.map((m) => ({
+            projectId,
+            nik: m.nik,
+            id_dt_project_role: m.roleId,
+          })),
+        });
+      }
+
+      // 6) UPDATE role yang berubah
+      if (toUpdate.length > 0) {
+        await Promise.all(
+          toUpdate.map((m) =>
+            tx.dT_MEMBER_PROJECT.updateMany({
+              where: {
+                projectId,
+                nik: m.newData.nik,
+              },
+              data: {
+                id_dt_project_role: m.newData.roleId,
+              },
+            }),
+          ),
+        );
+      }
+
+      // 7) Ambil list final buat dikembalikan ke UI
+      const finalDbMembers = await tx.dT_MEMBER_PROJECT.findMany({
+        where: { projectId },
+        select: {
+          nik: true,
+          user: {
+            select: { nama: true },
+          },
+        },
+        orderBy: {
+          user: { nama: 'asc' },
+        },
+      });
+
+      return finalDbMembers.map((m) => ({
+        nik: this.normalizeNik(m.nik),
+        nama: m.user.nama,
+      }));
+    });
+
+    // ==== KIRIM EMAIL DI SINI (pakai diff di atas) ====
+
+    if (toCreate.length === 0 && toUpdate.length === 0 && toDeleteNik.length === 0) {
+      return finalMembers;
+    }
+
+    try {
+      const project = await this.prismaService.dT_PROJECT.findUnique({
+        where: { id: projectId },
+        select: { name: true },
+      });
+      const projectName = (project?.name as string) ?? 'Project';
+
+      const nikToNotify = Array.from(
+        new Set([
+          ...toCreate.map((m) => m.nik),
+          ...toUpdate.map((x) => x.newData.nik),
+          ...toDeleteNik,
+        ]),
+      );
+
+      const users = await this.prismaService.dT_USER.findMany({
+        where: { nik: { in: nikToNotify } },
+        select: {
+          nik: true,
+          nama: true,
+          email: true,
+        },
+      });
+      const userMap = new Map(users.map((u) => [this.normalizeNik(u.nik), u]));
+
+      // 1) NEW MEMBERS → "diundang / bergabung"
+      for (const m of toCreate) {
+        const u = userMap.get(this.normalizeNik(m.nik));
+        if (!u?.email) continue;
+
+        await this.mailService.sendProjectJoinedEmail({
+          to: u.email,
+          projectId,
+          projectName,
+          role: m.roleId as 'OWNER' | 'EDITOR' | 'READ',
+        });
+      }
+
+      // 2) ROLE CHANGED → "role diubah"
+      for (const x of toUpdate) {
+        const u = userMap.get(this.normalizeNik(x.newData.nik));
+        if (!u?.email) continue;
+
+        await this.mailService.sendProjectRoleChangedEmail({
+          to: u.email,
+          projectId,
+          projectName,
+          oldRole: x.oldRole,
+          newRole: x.newData.roleId as 'OWNER' | 'EDITOR' | 'READ',
+        });
+      }
+
+      // 3) REMOVED → "akses dicabut"
+      for (const nik of toDeleteNik) {
+        const u = userMap.get(this.normalizeNik(nik));
+        if (!u?.email) continue;
+
+        await this.mailService.sendProjectAccessRevokedEmail({
+          to: u.email,
+          projectId,
+          projectName,
+        });
+      }
+    } catch (e) {
+      console.warn('Failed sending project member emails:', e);
+    }
+
+    return finalMembers;
+  }
+
   // =========================================================
   // 🔹 Sub TASK MANAGEMENT
   // =========================================================
@@ -373,6 +896,86 @@ export class ProjectService {
         ...(data.status !== undefined && { status: data.status }),
       },
     });
+  }
+
+  async syncSubTaskAssignees(
+    taskId: string,
+    subTaskId: string,
+    dto: SyncSubTaskAssigneeRequest,
+  ): Promise<string> {
+    const normalizeNik = (v: string | number | null | undefined): string =>
+      v == null ? '' : String(v).trim();
+
+    const nextNikList = Array.from(
+      new Set((dto.assignees ?? []).map((a) => normalizeNik(a.nik)).filter((n) => n.length > 0)),
+    );
+
+    // 1) Validasi task assignees
+    const taskAssignees = await this.prismaService.dT_ASSIGNEE_TASK.findMany({
+      where: { taskId },
+      select: { nik: true },
+    });
+
+    const allowedNiks = new Set(taskAssignees.map((a) => normalizeNik(a.nik)));
+    const invalid = nextNikList.filter((nik) => !allowedNiks.has(nik));
+    if (invalid.length > 0) {
+      throw new BadRequestException(
+        `User berikut bukan bagian dari Task ini: ${invalid.join(', ')}`,
+      );
+    }
+
+    // 2) TRANSAKSI dengan row lock
+    const result = await this.prismaService.$transaction(async (tx) => {
+      // ✅ Lock subtask row untuk mencegah concurrent update
+      await tx.$executeRaw`
+      SELECT id FROM dbo.DT_SUB_TASK WITH (UPDLOCK, ROWLOCK)
+      WHERE id = ${subTaskId}
+    `;
+
+      // 3) Baca existing assignees DALAM transaksi (setelah lock)
+      const existing = await tx.dT_ASSIGNEE_SUBTASK.findMany({
+        where: { subTaskId },
+        select: { nik: true },
+      });
+
+      const existingSet = new Set(existing.map((e) => normalizeNik(e.nik)));
+      const nextSet = new Set(nextNikList);
+
+      const toDelete = [...existingSet].filter((nik) => !nextSet.has(nik));
+      const toInsert = [...nextSet].filter((nik) => !existingSet.has(nik));
+
+      // Early return di dalam transaksi
+      if (!toDelete.length && !toInsert.length) {
+        return { toInsert: 0, toDelete: 0 };
+      }
+
+      // 4) Delete & Insert
+      if (toDelete.length) {
+        await tx.dT_ASSIGNEE_SUBTASK.deleteMany({
+          where: {
+            subTaskId,
+            nik: { in: toDelete },
+          },
+        });
+      }
+
+      if (toInsert.length) {
+        await tx.dT_ASSIGNEE_SUBTASK.createMany({
+          data: toInsert.map((nik) => ({
+            subTaskId,
+            nik,
+          })),
+        });
+      }
+
+      return { toInsert: toInsert.length, toDelete: toDelete.length };
+    });
+
+    if (result.toInsert === 0 && result.toDelete === 0) {
+      return 'Tidak ada perubahan assignee sub task.';
+    }
+
+    return `Berhasil sinkron assignee sub task. Tambah: ${result.toInsert}, hapus: ${result.toDelete}.`;
   }
 
   async deleteSubTask(subtaskId: string): Promise<{ message: string }> {
@@ -482,23 +1085,43 @@ export class ProjectService {
     desc: string | null;
     dueDate: Date | null;
     status: boolean;
-    assignees: { nik: string; name: string; assignedAt: Date }[];
+    assignees: { user: { nik: string; nama: string } }[];
     creator: { nama: string } | null;
-    subTask?: SubTask[];
+    subTask?: {
+      id: string;
+      name: string;
+      dueDate: Date | null;
+      status: boolean;
+      assignees: { user: { nik: string; nama: string } }[];
+    }[];
   }): TaskNonSection {
     return {
       id: t.id,
       name: t.name,
-      desc: t.desc ?? '',
-      dueDate: t.dueDate ?? null,
+      // kalau mau tetap pakai string kosong ketika null, pakai: t.desc ?? ''
+      desc: t.desc,
+      dueDate: t.dueDate,
       status: Boolean(t.status),
+
       assignees: (t.assignees ?? []).map((a) => ({
-        nik: a.nik,
-        name: a.name,
-        assignedAt: a.assignedAt,
+        nik: a.user.nik,
+        nama: a.user.nama,
       })),
+
       creator: { nama: t.creator?.nama ?? '' },
-      subTask: t.subTask ?? [],
+
+      subTask:
+        t.subTask?.map<SubTask>((st) => ({
+          id: st.id,
+          name: st.name,
+          dueDate: st.dueDate,
+          status: st.status,
+          assignees:
+            st.assignees?.map((sa) => ({
+              nik: sa.user.nik,
+              nama: sa.user.nama,
+            })) ?? [],
+        })) ?? [],
     };
   }
 
@@ -509,41 +1132,55 @@ export class ProjectService {
       desc: true,
       dueDate: true,
       status: true,
+
       assignees: {
         select: {
-          nik: true,
-          name: true,
-          assignedAt: true,
+          user: {
+            select: {
+              nik: true,
+              nama: true,
+            },
+          },
         },
       },
+
+      attachments: {
+        select: {
+          id: true,
+          taskId: true,
+          mimeType: true,
+          filename: true,
+          url: true,
+        },
+      },
+
       creator: {
         select: {
           nama: true,
         },
       },
+
       subTask: {
         select: {
           id: true,
           name: true,
           dueDate: true,
           status: true,
-          rank: true,
-          id_dt_task: true,
-          createdAt: true,
           assignees: {
             select: {
-              nik: true,
-              name: true,
-              assignedAt: true,
+              user: {
+                select: {
+                  nik: true,
+                  nama: true,
+                },
+              },
             },
           },
         },
         orderBy: { rank: 'asc' as const },
       },
-    };
+    } as const;
   }
-
-  /** 🔹 Ambil semua task & section dengan struktur terformat */
   async findTasksAndSections(projectId: string): Promise<TaskSectionResponse> {
     const [unlocatedTasks, sections] = await Promise.all([
       this.prismaService.dT_TASK.findMany({
@@ -713,6 +1350,29 @@ export class ProjectService {
   // =========================================================
   // 🔹 HELPER METHODS
   // =========================================================
+  // === helper kecil untuk normalisasi members dari FE → MemberRequest[] ===
+  private normalizeMembersFromCreate(
+    members: CreateProjectRequest['members'],
+    creatorNik: string,
+  ): MemberRequest[] {
+    if (!members?.length) return [];
+
+    return members
+      .map<MemberRequest>((m) => {
+        const nik = this.normalizeNik(m.nik);
+
+        // FE bisa kirim roleId ATAU role → kita normalisasi
+        const roleId: EProjectRole = m.roleId ?? m.roleId ?? EProjectRole.EDITOR;
+
+        return { nik, roleId };
+      })
+      .filter(
+        (m) =>
+          !!m.nik &&
+          m.nik !== creatorNik && // jangan masukin OWNER (creator) lagi
+          m.roleId !== EProjectRole.OWNER, // OWNER dikelola server
+      );
+  }
 
   // =========================
   // 🔢 RANKING UTIL (Section)

@@ -32,16 +32,33 @@ export class CreateProjectRequest {
   members?: Member[];
 }
 
+export class UpdateProjectRequest {
+  @IsString()
+  @IsOptional()
+  @MaxLength(100)
+  name?: string;
+
+  @IsString()
+  @IsOptional()
+  @MaxLength(500)
+  desc?: string;
+
+  @IsBoolean()
+  @IsOptional()
+  isArchive?: boolean;
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => MemberRequest)
+  members?: MemberRequest[];
+}
+
 export class Member {
   @IsString()
   @IsNotEmpty()
   @MaxLength(9)
   nik!: string;
-
-  @IsString()
-  @IsNotEmpty()
-  @MaxLength(9)
-  nama!: string;
 
   @IsEnum(EProjectRole)
   @IsNotEmpty()
@@ -52,6 +69,10 @@ export class Member {
 // TASK DTO
 // =========================================================
 export class CreateTaskProjectRequest {
+  @IsUUID()
+  @IsOptional()
+  section?: string;
+
   @IsString()
   @IsNotEmpty()
   @MaxLength(255)
@@ -108,10 +129,6 @@ class AssigneeDto {
   @MinLength(8)
   @MaxLength(8)
   nik: string;
-
-  @IsString()
-  @IsNotEmpty()
-  name: string;
 }
 export class UpdateTaskRequest {
   @IsOptional()
@@ -170,4 +187,23 @@ export class UpdateSubTaskRequest {
   @IsBoolean()
   @IsOptional()
   status?: boolean;
+}
+
+export class SyncSubTaskAssigneeRequest {
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => AssigneeDto)
+  assignees?: AssigneeDto[];
+}
+
+export class MemberRequest {
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(9)
+  nik!: string;
+
+  @IsEnum(EProjectRole)
+  @IsNotEmpty()
+  roleId!: EProjectRole;
 }

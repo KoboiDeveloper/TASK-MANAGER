@@ -67,10 +67,10 @@ export class AuthController {
 
   @UseGuards(AuthGuard)
   @Get('user-info')
-  getUserInfo(@Req() request: Request) {
+  async getUserInfo(@Req() request: Request) {
     const user = request['user'] as DT_USER;
-    const { nik, nama, roleId } = user;
-    return new CommonResponse('Welcome', HttpStatus.OK, { nik, nama, roleId });
+    const userInfo = await this.authService.userInfo(user.nik);
+    return new CommonResponse('Welcome', HttpStatus.OK, userInfo);
   }
 
   @Post('forgot-password')

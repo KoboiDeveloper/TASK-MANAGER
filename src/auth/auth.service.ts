@@ -1,4 +1,11 @@
-import { BadRequestException, Injectable, UnauthorizedException } from '@nestjs/common';
+import {
+  BadRequestException,
+  HttpException,
+  Injectable,
+  InternalServerErrorException,
+  NotFoundException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { comparePassword, encodePassword } from '../utils/bcrypt';
 import { LoginRequest } from './dto/request/loginRequest';
@@ -8,6 +15,7 @@ import { ForgotPwRequest } from './dto/request/forgotPwRequest';
 import { ResetPwRequest } from './dto/request/resetPwRequest';
 import { MailService } from '../utils/mail/mail.service';
 import { SuspendedUserException } from '../utils/suspendExecption';
+import { GetInfoUserResponse } from './dto/response/getInfoResponse';
 
 interface JwtPayload {
   nik: string;
@@ -30,6 +38,7 @@ export class AuthService implements IAuthService {
     private jwtService: JwtService,
     private mailService: MailService,
   ) {}
+
   async validateUser(data: LoginRequest): Promise<LoginResponse> {
     const user = await this.prismaService.dT_USER.findUnique({
       where: { nik: data.nik },
@@ -98,5 +107,46 @@ export class AuthService implements IAuthService {
     ]);
 
     return 'Change Password Successfully';
+  }
+
+  async userInfo(nik: string): Promise<GetInfoUserResponse> {
+    try {
+      const dbUser = await this.prismaService.dT_USER.findUnique({
+        where: { nik },
+        select: {
+          nik: true,
+          nama: true,
+          roleId: true,
+          memberProjects: {
+            orderBy: { projectId: 'asc' },
+            select: {
+              projectId: true,
+              roleProject: { select: { name: true } }, // ambil name dari relasi
+            },
+          },
+        },
+      });
+
+      if (!dbUser) {
+        throw new NotFoundException('User not found');
+      }
+
+      const result: GetInfoUserResponse = {
+        nik: dbUser.nik,
+        nama: dbUser.nama,
+        roleId: dbUser.roleId,
+        memberProjects: dbUser.memberProjects.map((mp) => ({
+          projectId: mp.projectId,
+          roleProject: mp.roleProject?.name ?? '', // mapping objek -> string
+        })),
+      };
+
+      return result;
+    } catch (e) {
+      // biarkan HttpException yang sudah kamu buat tetap keluar apa adanya
+      if (e instanceof HttpException) throw e;
+      // selain itu anggap error server
+      throw new InternalServerErrorException(e);
+    }
   }
 }

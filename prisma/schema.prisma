@@ -148,9 +148,10 @@ model DT_PROJECT {
   id          String        @id @default(uuid()) @db.UniqueIdentifier
   name        String        @db.VarChar(100)
   desc        String?       @db.VarChar(255)
-  color       String?     @db.VarChar(30)
+  color       String?       @db.VarChar(30)
   createdBy   String        @db.Char(9)
   createdAt   DateTime      @default(now())
+  isArchive   Boolean       @default(false)
   user        DT_USER       @relation("CreatedProjects", fields: [createdBy], references: [nik], onDelete: NoAction, onUpdate: NoAction)
 
   // Relasi ke data lain
@@ -200,12 +201,13 @@ model DT_TASK {
   id_dt_project   String      @db.UniqueIdentifier
   id_dt_section   String?     @db.UniqueIdentifier
   assignees         DT_ASSIGNEE_TASK[]
+
   rank          String?  @db.VarChar(16)
 
   project DT_PROJECT @relation(fields: [id_dt_project], references: [id], onDelete: NoAction, onUpdate: NoAction)
   creator DT_USER @relation("CreatedTasks", fields: [createdBy], references: [nik], onDelete: NoAction, onUpdate: NoAction)
   section DT_SECTION? @relation(fields: [id_dt_section], references: [id], onDelete: Cascade, onUpdate: NoAction)
-
+  attachments  DT_TASK_ATTACHMENT[] @relation("TaskAttachment")
   subTask DT_SUB_TASK[]
   tags    DT_TAG[]
   logs    LOG_ACTIVITY[]
@@ -214,6 +216,21 @@ model DT_TASK {
   @@index([id_dt_section])
   @@index([rank])
   @@index([createdBy])
+}
+
+
+model DT_TASK_ATTACHMENT {
+  id        String   @id @default(uuid()) @db.UniqueIdentifier
+  url       String   @db.VarChar(255)
+  filename  String   @db.VarChar(20)
+  mimeType  String   @db.VarChar(20)
+  createdAt DateTime @default(now())
+  bytes     Int
+
+  taskId    String?  @db.UniqueIdentifier
+  task      DT_TASK? @relation("TaskAttachment", fields: [taskId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+
+  @@index([taskId])
 }
 
 
@@ -241,7 +258,6 @@ model DT_ASSIGNEE_TASK {
   id         String   @id @default(uuid()) @db.UniqueIdentifier
   taskId     String   @db.UniqueIdentifier
   nik        String   @db.Char(9)
-  name        String  @db.VarChar(50)
   assignedAt DateTime @default(now())
 
   task DT_TASK @relation(fields: [taskId], references: [id], onDelete: Cascade, onUpdate: NoAction)
@@ -255,9 +271,8 @@ model DT_ASSIGNEE_TASK {
 
 model DT_ASSIGNEE_SUBTASK {
   id           String   @id @default(uuid()) @db.UniqueIdentifier
-  subTaskId String   @db.UniqueIdentifier
+  subTaskId    String   @db.UniqueIdentifier
   nik          String   @db.Char(9)
-  name         String  @db.VarChar(50)
   assignedAt   DateTime @default(now())
 
     subTask DT_SUB_TASK @relation(fields: [subTaskId], references: [id], onDelete: Cascade, onUpdate: NoAction)
