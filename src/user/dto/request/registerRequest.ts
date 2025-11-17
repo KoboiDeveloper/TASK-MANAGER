@@ -29,8 +29,8 @@ class RegionIdDto {
 export class RegisterRequest {
   @IsNotEmpty({ message: 'NIK tidak boleh kosong' })
   @IsString({ message: 'NIK harus berupa angka' })
-  @MaxLength(9, { message: 'NIK maksimal 9 karakter' })
-  @MinLength(9, { message: 'NIK minimal 9 karakter' })
+  @MaxLength(8, { message: 'NIK maksimal 8 karakter' })
+  @MinLength(8, { message: 'NIK minimal 8 karakter' })
   nik: string;
 
   @IsNotEmpty({ message: 'Nama tidak boleh kosong' })
