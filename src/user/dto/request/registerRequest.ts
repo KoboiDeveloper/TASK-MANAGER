@@ -2,7 +2,6 @@ import {
   IsNotEmpty,
   IsString,
   MaxLength,
-  MinLength,
   IsStrongPassword,
   Matches,
   IsEmail,
@@ -10,6 +9,7 @@ import {
   ValidateNested,
   IsEnum,
   IsBoolean,
+  Length,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ERole } from '../../../constant/ERole';
@@ -29,8 +29,7 @@ class RegionIdDto {
 export class RegisterRequest {
   @IsNotEmpty({ message: 'NIK tidak boleh kosong' })
   @IsString({ message: 'NIK harus berupa angka' })
-  @MaxLength(8, { message: 'NIK maksimal 8 karakter' })
-  @MinLength(8, { message: 'NIK minimal 8 karakter' })
+  @Length(8, 8, { message: 'NIK harus 8 karakter' })
   nik: string;
 
   @IsNotEmpty({ message: 'Nama tidak boleh kosong' })
