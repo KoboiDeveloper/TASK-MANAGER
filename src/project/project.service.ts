@@ -506,7 +506,7 @@ export class ProjectService {
     // 3) Normalisasi tetangga (harus di section tujuan)
     const beforeIdRaw = this.normalizeGuid(body.beforeId ?? null);
     const afterIdRaw = this.normalizeGuid(body.afterId ?? null);
-    const beforeId = beforeIdRaw === tid ? null : beforeIdRaw; // hindari self
+    const beforeId = beforeIdRaw === tid ? null : beforeIdRaw;
     const afterId = afterIdRaw === tid ? null : afterIdRaw;
 
     // 4) Ambil rank tetangga di section tujuan
@@ -1197,7 +1197,7 @@ export class ProjectService {
           rank: true,
           tasks: {
             select: this.taskSelect,
-            orderBy: [{ rank: 'asc' }],
+            orderBy: [{ rank: 'desc' }],
           },
         },
         orderBy: { rank: 'asc' },

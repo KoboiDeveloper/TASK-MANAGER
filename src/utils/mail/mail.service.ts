@@ -16,7 +16,7 @@ export class MailService implements OnModuleInit {
   ) {
     this.domain =
       process.env.NODE_ENV === 'production'
-        ? (process.env.FRONTEND_URL as string) // wajib isi di server
+        ? (process.env.FRONTEND_URL as string)
         : (process.env.FRONTEND_URL ?? 'http://localhost:3000');
 
     this.fromName = this.cfg.get<string>('SMTP_FROM_NAME') || 'Task Manager';
