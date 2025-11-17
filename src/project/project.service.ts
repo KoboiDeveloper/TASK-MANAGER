@@ -183,7 +183,7 @@ export class ProjectService {
     nik: string,
     data: CreateTaskProjectRequest,
   ): Promise<string> {
-    const { name, desc } = data;
+    const { name, desc, section } = data;
 
     await this.ensureProjectExists(projectId);
 
@@ -192,6 +192,7 @@ export class ProjectService {
         name,
         desc,
         id_dt_project: projectId,
+        id_dt_section: section,
         createdBy: nik,
       },
     });
