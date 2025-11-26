@@ -29,7 +29,7 @@ class RegionIdDto {
 export class RegisterRequest {
   @IsNotEmpty({ message: 'NIK tidak boleh kosong' })
   @IsString({ message: 'NIK harus berupa angka' })
-  @Length(8, 8, { message: 'NIK harus 8 karakter' })
+  @Length(7, 9, { message: 'NIK harus 8 karakter' })
   nik: string;
 
   @IsNotEmpty({ message: 'Nama tidak boleh kosong' })

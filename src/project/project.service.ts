@@ -30,6 +30,7 @@ import { UserService } from '../user/user.service';
 import { MailService } from '../utils/mail/mail.service';
 import { EProjectRole } from '../constant/EProjectRole';
 import { del, put } from '@vercel/blob';
+
 @Injectable()
 export class ProjectService {
   private readonly logger = new Logger(ProjectService.name);
@@ -83,7 +84,7 @@ export class ProjectService {
         },
       });
 
-      // ❗ anggota lain TIDAK dibuat di sini, supaya semua logika diff dipegang syncProjectMembers
+      // anggota lain TIDAK dibuat di sini, supaya semua logika diff dipegang syncProjectMembers
       return project.id;
     });
 
@@ -187,13 +188,40 @@ export class ProjectService {
 
     await this.ensureProjectExists(projectId);
 
+    // Cari task dengan rank paling BESAR (paling bawah)
+    const last = await this.prismaService.dT_TASK.findFirst({
+      where: {
+        id_dt_project: projectId,
+        id_dt_section: section ?? null,
+      },
+      orderBy: { rank: 'desc' }, // ambil rank terbesar
+      select: { rank: true },
+    });
+
+    let newRank: string;
+
+    // 1) Belum ada task, ATAU task ada tapi rank-nya masih null
+    if (!last || !last.rank) {
+      newRank = this.rankFirst(); // "0000000000000001"
+    } else {
+      // 2) Sudah ada rank valid → append di paling bawah
+      newRank = this.rankAfter(last.rank); // selalu 16 digit string
+    }
+
+    this.logger.debug(
+      `createTask(project=${projectId}, section=${section ?? 'NULL'}) lastRank=${
+        last?.rank ?? 'NULL'
+      } newRank=${newRank}`,
+    );
+
     const task = await this.prismaService.dT_TASK.create({
       data: {
         name,
         desc,
         id_dt_project: projectId,
-        id_dt_section: section,
+        id_dt_section: section ?? null,
         createdBy: nik,
+        rank: newRank,
       },
     });
 
@@ -374,7 +402,9 @@ export class ProjectService {
         const originalName = file.originalname || 'file';
         const safeFilename = originalName.length > 20 ? originalName.slice(0, 20) : originalName; // schema: VarChar(20)
 
-        const key = `tasks/${taskId}/${Date.now()}-${Math.random().toString(36).slice(2)}-${originalName}`;
+        const key = `tasks/${taskId}/${Date.now()}-${Math.random()
+          .toString(36)
+          .slice(2)}-${originalName}`;
 
         const blob = await put(key, file.buffer, {
           access: 'public',
@@ -488,7 +518,7 @@ export class ProjectService {
     if (!task) throw new NotFoundException(`Task ${tid} not found in project ${pid}`);
 
     // 2) Tujuan section:
-    //    - properti tSectionId TIDAK DIKIRIM => reorder in-place
+    //    - properti targetSectionId TIDAK DIKIRIM => reorder in-place
     //    - DIKIRIM null => pindah ke UNLOCATED
     //    - DIKIRIM UUID => pindah ke section tsb
     let destSectionId: string | null;
@@ -525,48 +555,56 @@ export class ProjectService {
         : Promise.resolve(null),
     ]);
 
-    // 5) Hitung rank baru (LIST DESC)
+    // 5) Hitung rank baru (LIST ASC – rank kecil = paling atas)
     const computeNewRank = async (): Promise<string> => {
-      // ✅ Both neighbors (before = di atas, after = di bawah)
-      if (before && after) {
-        return this.rankBetween(before.rank ?? null, after.rank ?? null);
+      // FE: afterId = neighbor ATAS, beforeId = neighbor BAWAH
+      const top = after;
+      const bottom = before;
+
+      // ✅ Kedua tetangga ada → sisip di tengah
+      if (top && bottom) {
+        return this.rankBetween(top.rank ?? null, bottom.rank ?? null);
       }
 
-      // ✅ Only beforeId → taruh TEPAT di bawah 'before'
-      if (before && !after) {
+      // ✅ Hanya ada tetangga atas (top) → taruh TEPAT DI BAWAH-nya
+      if (top && !bottom) {
         const nextBelow = await this.prismaService.dT_TASK.findFirst({
           where: {
             id_dt_project: pid,
             id_dt_section: destSectionId ?? null,
-            rank: { gt: before.rank ?? undefined }, // ASC: bawah = rank lebih besar
+            rank: { gt: top.rank ?? undefined }, // bawah = rank lebih besar
           },
           orderBy: { rank: 'asc' }, // yang paling dekat di bawah
           select: { rank: true },
         });
-        return this.rankBetween(before.rank ?? null, nextBelow?.rank ?? null);
+
+        return this.rankBetween(top.rank ?? null, nextBelow?.rank ?? null);
       }
 
-      // ✅ Only afterId → taruh TEPAT di atas 'after'
-      if (!before && after) {
+      // ✅ Hanya ada tetangga bawah (bottom) → taruh TEPAT DI ATAS-nya
+      if (!top && bottom) {
         const prevAbove = await this.prismaService.dT_TASK.findFirst({
           where: {
             id_dt_project: pid,
             id_dt_section: destSectionId ?? null,
-            rank: { lt: after.rank ?? undefined }, // ASC: atas = rank lebih kecil
+            rank: { lt: bottom.rank ?? undefined }, // atas = rank lebih kecil
           },
           orderBy: { rank: 'desc' }, // yang paling dekat di atas
           select: { rank: true },
         });
-        return this.rankBetween(prevAbove?.rank ?? null, after.rank ?? null);
+
+        return this.rankBetween(prevAbove?.rank ?? null, bottom.rank ?? null);
       }
 
+      // ✅ Tanpa neighbors → append PALING BAWAH
       const max = await this.prismaService.dT_TASK.findFirst({
         where: { id_dt_project: pid, id_dt_section: destSectionId ?? null },
-        orderBy: { rank: 'desc' },
+        orderBy: { rank: 'desc' }, // terbesar = paling bawah (ASC)
         select: { rank: true },
       });
       return this.rankAfter(max?.rank ?? null);
     };
+
     const newRank = await computeNewRank();
 
     // 6) No-op guard kalau ternyata tidak berubah
@@ -604,7 +642,7 @@ export class ProjectService {
     const toUpdate: { newData: MemberRequest; oldRole: EProjectRole }[] = [];
     const toDeleteNik: string[] = [];
 
-    // 🔹 normalisasi payload dulu (terutama nik)
+    // normalisasi payload dulu (terutama nik)
     const normalizedMembers: MemberRequest[] = members.map((m) => ({
       ...m,
       nik: this.normalizeNik(m.nik),
@@ -675,7 +713,7 @@ export class ProjectService {
         const isStillInPayload = newMap.has(old.nik);
 
         if (!isStillInPayload) {
-          // ❗ Kalau gak mau pernah hapus OWNER, bisa skip di sini
+          // kalau gak mau pernah hapus OWNER, bisa skip di sini
           if (this.isOwnerRole(old.id_dt_project_role)) {
             continue;
           }
@@ -686,7 +724,7 @@ export class ProjectService {
 
       // 4) DELETE (hapus assignee task & subtask, baru hapus member)
       if (toDeleteNik.length > 0) {
-        // 🔹 4a. Ambil semua task di project ini
+        // 4a. Ambil semua task di project ini
         const tasks = await tx.dT_TASK.findMany({
           where: { id_dt_project: projectId },
           select: {
@@ -695,7 +733,7 @@ export class ProjectService {
         });
         const taskIds = tasks.map((t) => t.id);
 
-        // 🔹 4b. Ambil semua subtask dari task tersebut
+        // 4b. Ambil semua subtask dari task tersebut
         let subTaskIds: string[] = [];
         if (taskIds.length > 0) {
           const subTasks = await tx.dT_SUB_TASK.findMany({
@@ -705,27 +743,27 @@ export class ProjectService {
           subTaskIds = subTasks.map((st) => st.id);
         }
 
-        // 🔹 4c. Hapus assignee task untuk nik yang dicabut
+        // 4c. Hapus assignee task untuk nik yang dicabut
         if (taskIds.length > 0) {
           await tx.dT_ASSIGNEE_TASK.deleteMany({
             where: {
               nik: { in: toDeleteNik },
-              taskId: { in: taskIds }, // ⬅️ sesuaikan field FK kalau beda
+              taskId: { in: taskIds },
             },
           });
         }
 
-        // 🔹 4d. Hapus assignee subtask untuk nik yang dicabut
+        // 4d. Hapus assignee subtask untuk nik yang dicabut
         if (subTaskIds.length > 0) {
           await tx.dT_ASSIGNEE_SUBTASK.deleteMany({
             where: {
               nik: { in: toDeleteNik },
-              subTaskId: { in: subTaskIds }, // ⬅️ ini sudah sesuai model kamu
+              subTaskId: { in: subTaskIds },
             },
           });
         }
 
-        // 🔹 4e. Terakhir, hapus membership project-nya
+        // 4e. Terakhir, hapus membership project-nya
         await tx.dT_MEMBER_PROJECT.deleteMany({
           where: {
             projectId,
@@ -929,9 +967,9 @@ export class ProjectService {
     const result = await this.prismaService.$transaction(async (tx) => {
       // ✅ Lock subtask row untuk mencegah concurrent update
       await tx.$executeRaw`
-      SELECT id FROM dbo.DT_SUB_TASK WITH (UPDLOCK, ROWLOCK)
-      WHERE id = ${subTaskId}
-    `;
+          SELECT id FROM dbo.DT_SUB_TASK WITH (UPDLOCK, ROWLOCK)
+          WHERE id = ${subTaskId}
+      `;
 
       // 3) Baca existing assignees DALAM transaksi (setelah lock)
       const existing = await tx.dT_ASSIGNEE_SUBTASK.findMany({
@@ -1020,30 +1058,35 @@ export class ProjectService {
 
     const [before, after] = await Promise.all([fetchNeighbor(beforeId), fetchNeighbor(afterId)]);
 
+    const MAX_RETRY = 3;
     const computeNewRank = async (): Promise<string> => {
-      // ✅ Both neighbors (before = di atas, after = di bawah)
-      if (before && after) {
-        return this.rankBetween(before.rank ?? null, after.rank ?? null);
+      // FE: afterId = neighbor ATAS, beforeId = neighbor BAWAH
+      const top = after;
+      const bottom = before;
+
+      // ✅ Both neighbors (top = di atas, bottom = di bawah)
+      if (top && bottom) {
+        return this.rankBetween(top.rank ?? null, bottom.rank ?? null);
       }
 
-      // ✅ Only before → taruh TEPAT di bawah 'before'
-      if (before && !after) {
+      // ✅ Only top → taruh TEPAT di bawah 'top'
+      if (top && !bottom) {
         const nextBelow = await this.prismaService.dT_SUB_TASK.findFirst({
-          where: { id_dt_task: tid, rank: { gt: before.rank ?? undefined } }, // bawah = lebih besar
+          where: { id_dt_task: tid, rank: { gt: top.rank ?? undefined } }, // bawah = lebih besar
           orderBy: { rank: 'asc' }, // paling dekat di bawah
           select: { rank: true },
         });
-        return this.rankBetween(before.rank ?? null, nextBelow?.rank ?? null);
+        return this.rankBetween(top.rank ?? null, nextBelow?.rank ?? null);
       }
 
-      // ✅ Only after → taruh TEPAT di atas 'after'
-      if (!before && after) {
+      // ✅ Only bottom → taruh TEPAT di atas 'bottom'
+      if (!top && bottom) {
         const prevAbove = await this.prismaService.dT_SUB_TASK.findFirst({
-          where: { id_dt_task: tid, rank: { lt: after.rank ?? undefined } }, // atas = lebih kecil
+          where: { id_dt_task: tid, rank: { lt: bottom.rank ?? undefined } }, // atas = lebih kecil
           orderBy: { rank: 'desc' }, // paling dekat di atas
           select: { rank: true },
         });
-        return this.rankBetween(prevAbove?.rank ?? null, after.rank ?? null);
+        return this.rankBetween(prevAbove?.rank ?? null, bottom.rank ?? null);
       }
 
       // ✅ Tanpa neighbors → append PALING BAWAH
@@ -1054,7 +1097,7 @@ export class ProjectService {
       });
       return this.rankAfter(max?.rank ?? null);
     };
-    const MAX_RETRY = 3;
+
     for (let attempt = 1; attempt <= MAX_RETRY; attempt++) {
       try {
         const newRank = await computeNewRank();
@@ -1099,7 +1142,6 @@ export class ProjectService {
     return {
       id: t.id,
       name: t.name,
-      // kalau mau tetap pakai string kosong ketika null, pakai: t.desc ?? ''
       desc: t.desc,
       dueDate: t.dueDate,
       status: Boolean(t.status),
@@ -1160,7 +1202,6 @@ export class ProjectService {
           nama: true,
         },
       },
-
       subTask: {
         select: {
           id: true,
@@ -1182,6 +1223,7 @@ export class ProjectService {
       },
     } as const;
   }
+
   async findTasksAndSections(projectId: string): Promise<TaskSectionResponse> {
     const [unlocatedTasks, sections] = await Promise.all([
       this.prismaService.dT_TASK.findMany({
@@ -1197,7 +1239,7 @@ export class ProjectService {
           rank: true,
           tasks: {
             select: this.taskSelect,
-            orderBy: [{ rank: 'desc' }],
+            orderBy: [{ rank: 'asc' }],
           },
         },
         orderBy: { rank: 'asc' },
@@ -1312,6 +1354,7 @@ export class ProjectService {
         : Promise.resolve(null),
     ]);
 
+    // FE: afterId = atas, beforeId = bawah → sama seperti task
     const newRank = this.rankBetween(after?.rank ?? null, before?.rank ?? null);
 
     return this.prismaService.dT_SECTION.update({
@@ -1351,7 +1394,7 @@ export class ProjectService {
   // =========================================================
   // 🔹 HELPER METHODS
   // =========================================================
-  // === helper kecil untuk normalisasi members dari FE → MemberRequest[] ===
+  // helper kecil untuk normalisasi members dari FE → MemberRequest[]
   private normalizeMembersFromCreate(
     members: CreateProjectRequest['members'],
     creatorNik: string,
@@ -1361,10 +1404,7 @@ export class ProjectService {
     return members
       .map<MemberRequest>((m) => {
         const nik = this.normalizeNik(m.nik);
-
-        // FE bisa kirim roleId ATAU role → kita normalisasi
-        const roleId: EProjectRole = m.roleId ?? m.roleId ?? EProjectRole.EDITOR;
-
+        const roleId = m.roleId ?? EProjectRole.EDITOR;
         return { nik, roleId };
       })
       .filter(
@@ -1376,7 +1416,7 @@ export class ProjectService {
   }
 
   // =========================
-  // 🔢 RANKING UTIL (Section)
+  // 🔢 RANKING UTIL
   // =========================
   private static readonly WIDTH = 16;
   private static readonly MAX = BigInt('9'.repeat(ProjectService.WIDTH));
@@ -1404,6 +1444,11 @@ export class ProjectService {
   private rankAfter(prev?: string | null): string {
     return this.rankBetween(prev ?? null, null);
   }
+
+  private rankFirst(): string {
+    return '0000000000000001';
+  }
+
   private static readonly UUID_REGEX =
     /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
@@ -1496,6 +1541,7 @@ export class ProjectService {
     const nikToRole = new Map<string, EProjectRole>();
     for (const m of members ?? []) {
       const nik = m?.nik?.trim();
+      if (!nik) continue;
       const key = String(m?.roleId ?? 'READ').toUpperCase();
       nikToRole.set(nik, roleMap.get(key) ?? EProjectRole.READ);
     }
