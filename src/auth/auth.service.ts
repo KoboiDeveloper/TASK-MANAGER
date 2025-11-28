@@ -120,6 +120,12 @@ export class AuthService implements IAuthService {
           memberProjects: {
             orderBy: { projectId: 'asc' },
             select: {
+              project: {
+                select: {
+                  name: true,
+                  color: true,
+                },
+              },
               projectId: true,
               roleProject: { select: { name: true } }, // ambil name dari relasi
             },
@@ -137,7 +143,9 @@ export class AuthService implements IAuthService {
         roleId: dbUser.roleId,
         memberProjects: dbUser.memberProjects.map((mp) => ({
           projectId: mp.projectId,
-          roleProject: mp.roleProject?.name ?? '', // mapping objek -> string
+          name: mp.project.name,
+          color: mp.project.color,
+          roleProject: mp.roleProject?.name ?? '',
         })),
       };
 

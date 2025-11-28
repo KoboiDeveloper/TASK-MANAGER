@@ -38,6 +38,8 @@ import { CommonResponse } from '../common/commonResponse';
 import { handleException } from '../utils/handleException';
 import { AllowArchivedProject } from '../security/AllowArchivedProject.decorator';
 import { FilesInterceptor } from '@nestjs/platform-express';
+import { DT_USER } from '@prisma/client';
+import { ownTaskResponse } from './dto/response';
 
 type AuthUser = {
   nik: string;
@@ -53,6 +55,17 @@ export class ProjectController {
   // =========================================================
   // 🔹 PROJECT MANAGEMENT
   // =========================================================
+
+  @Get('own-tasks')
+  async getOwnTask(@Req() request: Request) {
+    const user = request['user'] as DT_USER;
+    try {
+      const responseGetOwnTask: ownTaskResponse[] = await this.projectService.taskOwn(user.nik);
+      return new CommonResponse('Get Own Tasks successfully', HttpStatus.OK, responseGetOwnTask);
+    } catch ({ message }) {
+      return handleException(message as string);
+    }
+  }
 
   @Get()
   async getOwnProjects(@Req() req: Request & { user?: Pick<AuthUser, 'nik' | 'roleId'> }) {
@@ -137,7 +150,6 @@ export class ProjectController {
   // =========================================================
   // 🔹 TASK MANAGEMENT
   // =========================================================
-
   @Put(':projectId/task/:taskId/move')
   @UseGuards(ProjectMemberGuard)
   @ProjectRoles(EProjectRole.OWNER, EProjectRole.EDITOR)

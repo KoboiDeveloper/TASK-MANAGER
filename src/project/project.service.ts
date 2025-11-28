@@ -25,6 +25,7 @@ import {
   TaskNonSection,
   TaskSectionResponse,
   AttachmentTask,
+  ownTaskResponse,
 } from './dto/response';
 import { UserService } from '../user/user.service';
 import { MailService } from '../utils/mail/mail.service';
@@ -226,6 +227,33 @@ export class ProjectService {
     });
 
     return task.id;
+  }
+
+  // project.service.ts
+  async taskOwn(nik: string): Promise<ownTaskResponse[]> {
+    return this.prismaService.dT_TASK.findMany({
+      where: {
+        assignees: {
+          some: {
+            nik,
+          },
+        },
+        status: false,
+      },
+      select: {
+        id: true,
+        name: true,
+        status: true,
+        dueDate: true,
+        project: {
+          select: {
+            id: true,
+            name: true,
+            color: true,
+          },
+        },
+      },
+    });
   }
 
   async updateTask(taskId: string, dto: UpdateTaskRequest): Promise<DT_TASK> {

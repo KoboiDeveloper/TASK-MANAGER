@@ -52,3 +52,15 @@ export type TaskSectionResponse = {
   unlocated: TaskNonSection[];
   sections: SectionGroup[];
 };
+
+export type ownTaskResponse = {
+  id: string;
+  name: string;
+  status: boolean;
+  dueDate: Date | null;
+  project: {
+    id:string;
+    name: string;
+    color: string | null;
+  };
+};

@@ -1,5 +1,7 @@
 class MemberProjects {
   projectId: string;
+  name: string;
+  color: string | null;
   roleProject: string;
 }
 
