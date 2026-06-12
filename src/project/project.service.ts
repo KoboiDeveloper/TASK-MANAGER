@@ -30,7 +30,7 @@ import {
 import { UserService } from '../user/user.service';
 import { MailService } from '../utils/mail/mail.service';
 import { EProjectRole } from '../constant/EProjectRole';
-import { del, put } from '@vercel/blob';
+import { DropboxStorageService } from '../storage/dropbox.storage.service';
 
 @Injectable()
 export class ProjectService {
@@ -40,6 +40,7 @@ export class ProjectService {
     private readonly prismaService: PrismaService,
     private readonly userService: UserService,
     private readonly mailService: MailService,
+    private readonly storageService: DropboxStorageService,
   ) {}
 
   // =========================================================
@@ -387,12 +388,12 @@ export class ProjectService {
         }
       });
 
-      // 3) Hapus file di Vercel Blob di luar transaksi
+      // 3) Hapus file di Dropbox di luar transaksi
       await Promise.all(
         attachments.map(async (att) => {
           if (!att.url) return;
           try {
-            await del(att.url);
+            await this.storageService.deleteFile(att.url);
           } catch (err) {
             console.error('Failed to delete blob for attachment', att.id, att.url, err);
           }
@@ -424,7 +425,7 @@ export class ProjectService {
       throw new NotFoundException(`Task ${taskId} not found`);
     }
 
-    // 1) Upload ke Vercel Blob dulu (di luar transaksi DB)
+    // 1) Upload ke Dropbox dulu (di luar transaksi DB)
     const uploadedAttachments = await Promise.all(
       attachments.map(async (file) => {
         const originalName = file.originalname || 'file';
@@ -434,14 +435,11 @@ export class ProjectService {
           .toString(36)
           .slice(2)}-${originalName}`;
 
-        const blob = await put(key, file.buffer, {
-          access: 'public',
-          contentType: file.mimetype,
-        });
+        const uploaded = await this.storageService.uploadFile(key, file.buffer, file.mimetype);
 
         return {
           taskId,
-          url: blob.url,
+          url: uploaded.url,
           filename: safeFilename,
           mimeType: file.mimetype,
           bytes: file.size,
@@ -506,11 +504,11 @@ export class ProjectService {
       );
     }
 
-    // 4) Hapus file dari Vercel Blob
+    // 4) Hapus file dari Dropbox
     await Promise.all(
       attachments.map(async (att) => {
         try {
-          await del(att.url);
+          await this.storageService.deleteFile(att.url);
         } catch (err) {
           console.error('Failed to delete blob', att.url, err);
         }

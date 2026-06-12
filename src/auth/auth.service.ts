@@ -137,7 +137,7 @@ export class AuthService implements IAuthService {
         throw new NotFoundException('User not found');
       }
 
-      const result: GetInfoUserResponse = {
+      return {
         nik: dbUser.nik,
         nama: dbUser.nama,
         roleId: dbUser.roleId,
@@ -148,12 +148,8 @@ export class AuthService implements IAuthService {
           roleProject: mp.roleProject?.name ?? '',
         })),
       };
-
-      return result;
     } catch (e) {
-      // biarkan HttpException yang sudah kamu buat tetap keluar apa adanya
       if (e instanceof HttpException) throw e;
-      // selain itu anggap error server
       throw new InternalServerErrorException(e);
     }
   }

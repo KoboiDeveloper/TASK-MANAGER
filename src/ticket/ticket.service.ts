@@ -1,6 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException, Logger, Inject } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { put } from '@vercel/blob';
 import { CreateTicketDto } from './dto/request/requestCreateTicket.dto';
 
 import { assertImageFile, safePathname, getOriginalName } from '../utils/file';
@@ -11,6 +10,7 @@ import { EStatus } from '../constant/EStatus';
 import { ResponseTicketCommand } from './dto/response/responseTicketCommand';
 import { TicketListResponseDto, UserTicketSummaryDto } from './dto/response/responseTIcket.dto';
 import { UserService } from '../user/user.service';
+import { DropboxStorageService } from '../storage/dropbox.storage.service';
 
 @Injectable()
 export class TicketService {
@@ -18,6 +18,7 @@ export class TicketService {
   constructor(
     private readonly prismaService: PrismaService,
     private readonly userService: UserService,
+    private readonly storageService: DropboxStorageService,
     @Inject('STORE_CLIENT') private readonly client: ClientProxy,
   ) {}
 
@@ -123,15 +124,11 @@ export class TicketService {
           type: file.mimetype || 'application/octet-stream',
         });
 
-        const blob = await put(pathname, data, {
-          access: 'public',
-          addRandomSuffix: true,
-          contentType: file.mimetype,
-        });
+        const uploaded = await this.storageService.uploadFile(pathname, file.buffer, file.mimetype || 'application/octet-stream');
 
         await this.prismaService.dT_IMAGES.create({
           data: {
-            url: blob.url,
+            url: uploaded.url,
             filename: getOriginalName(file).slice(0, 200),
             mimeType: (file.mimetype || 'application/octet-stream').slice(0, 100),
             bytes: file.size,
@@ -167,39 +164,119 @@ export class TicketService {
       idtv,
     } = data;
 
-    try {
-      // Buat ticket utama
-      await this.prismaService.dT_TICKET.create({
-        data: {
-          id,
-          handlerNik,
-          idStore,
-          noTelp,
-          category,
-          status: EStatus.QUEUED,
-          idtv,
-          description,
-          fromPayment,
-          toPayment,
-          isDirectSelling,
-          billCode,
-          grandTotal,
-        },
-      });
-    } catch (e) {
-      throw new BadRequestException(`Gagal membuat ticket: ${normalizeErrMsg(e)}`);
-    }
-    // ✅ proses multiple images pakai helper
+    // ✅ UPLOAD IMAGES DULU (sebelum transaksi DB)
+    let uploadedImages: Array<{
+      url: string;
+      filename: string;
+      mimeType: string;
+      bytes: number;
+      path: string;
+    }> = [];
+
     if (files?.length) {
-      const { added, errors } = await this.processImageFiles(files, id);
-      if (errors.length) {
-        this.logger.warn(`Ticket ${id}: ${errors.length} image gagal disimpan`);
-      } else {
-        this.logger.log(`Ticket ${id}: ${added} image berhasil disimpan`);
+      this.logger.log(`Ticket ${id}: Uploading ${files.length} image(s) to Dropbox...`);
+      
+      // Upload semua images dulu
+      for (const file of files) {
+        try {
+          assertImageFile(file);
+          const pathname = safePathname(getOriginalName(file) ?? 'upload.bin', id);
+          
+          const uploaded = await this.storageService.uploadFile(
+            pathname,
+            file.buffer,
+            file.mimetype || 'application/octet-stream'
+          );
+
+          uploadedImages.push({
+            url: uploaded.url,
+            filename: getOriginalName(file).slice(0, 200),
+            mimeType: (file.mimetype || 'application/octet-stream').slice(0, 100),
+            bytes: file.size,
+            path: uploaded.path,
+          });
+        } catch (e) {
+          const name = getOriginalName(file);
+          this.logger.error(`Ticket ${id}: Upload image "${name}" FAILED`);
+          
+          // ⚠️ ROLLBACK: Hapus semua images yang sudah ter-upload
+          await this.rollbackUploadedImages(uploadedImages, id);
+          
+          throw new BadRequestException(
+            `Gagal upload gambar "${name}": ${normalizeErrMsg(e)}. Ticket tidak dibuat.`
+          );
+        }
       }
+      
+      this.logger.log(`Ticket ${id}: ${uploadedImages.length} image(s) uploaded successfully`);
     }
 
-    return id;
+    // ✅ SIMPAN KE DB DALAM TRANSAKSI (ticket + images)
+    try {
+      await this.prismaService.$transaction(async (tx) => {
+        // 1) Buat ticket utama
+        await tx.dT_TICKET.create({
+          data: {
+            id,
+            handlerNik,
+            idStore,
+            noTelp,
+            category,
+            status: EStatus.QUEUED,
+            idtv,
+            description,
+            fromPayment,
+            toPayment,
+            isDirectSelling,
+            billCode,
+            grandTotal,
+          },
+        });
+
+        // 2) Simpan semua image records
+        if (uploadedImages.length > 0) {
+          await tx.dT_IMAGES.createMany({
+            data: uploadedImages.map((img) => ({
+              url: img.url,
+              filename: img.filename,
+              mimeType: img.mimeType,
+              bytes: img.bytes,
+              ticketId: id,
+            })),
+          });
+        }
+      });
+
+      this.logger.log(`Ticket ${id} created successfully with ${uploadedImages.length} image(s)`);
+      return id;
+    } catch (e) {
+      // ⚠️ ROLLBACK: Hapus semua images dari Dropbox jika DB save gagal
+      this.logger.error(`Ticket ${id}: Failed to save to DB, rolling back...`);
+      await this.rollbackUploadedImages(uploadedImages, id);
+      
+      throw new BadRequestException(`Gagal membuat ticket: ${normalizeErrMsg(e)}`);
+    }
+  }
+
+  // ✅ HELPER: Rollback uploaded images jika ada error
+  private async rollbackUploadedImages(
+    images: Array<{ url: string; path: string }>,
+    ticketId: string,
+  ): Promise<void> {
+    if (images.length === 0) return;
+
+    this.logger.warn(`Ticket ${ticketId}: Rolling back ${images.length} uploaded image(s)...`);
+    
+    for (const img of images) {
+      try {
+        await this.storageService.deleteFile(img.url);
+        this.logger.debug(`Ticket ${ticketId}: Rolled back image ${img.path}`);
+      } catch (err) {
+        this.logger.error(
+          `Ticket ${ticketId}: Failed to rollback image ${img.path}: ${normalizeErrMsg(err)}`,
+        );
+      }
+    }
   }
 
   async getTickets(): Promise<TicketListResponseDto[]> {

@@ -8,6 +8,7 @@ import { MailModule } from '../utils/mail/mail.module';
 import { PrismaModule } from '../prisma/prisma.module';
 import { MulterModule } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
+import { StorageModule } from '../storage/storage.module';
 
 const allowedMimes = [
   // Images
@@ -45,6 +46,7 @@ const fileFilter = (
 
 @Module({
   imports: [
+    StorageModule,
     JwtModule.register({}),
     MulterModule.register({
       storage: memoryStorage(),

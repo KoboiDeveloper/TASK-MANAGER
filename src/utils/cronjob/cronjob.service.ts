@@ -2,8 +2,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../../prisma/prisma.service';
-import { del } from '@vercel/blob';
 import { DT_IMAGES } from '@prisma/client';
+import { DropboxStorageService } from '../../storage/dropbox.storage.service';
 
 type ImageRow = Pick<DT_IMAGES, 'id' | 'url' | 'createdAt'>;
 
@@ -63,28 +63,15 @@ export class CronjobService {
   private readonly dryRun: boolean =
     String(process.env.CLEANUP_DRY_RUN ?? 'false').toLowerCase() === 'true';
 
-  private readonly blobToken: string = String(process.env.BLOB_READ_WRITE_TOKEN ?? '');
-
-  private isAllowedBlobHost(hostname: string): boolean {
-    if (!hostname) return false;
-    if (hostname === 'blob.vercel-storage.com') return true;
-    return (
-      hostname.endsWith('.blob.vercel-storage.com') ||
-      hostname.endsWith('.public.blob.vercel-storage.com')
-    );
-  }
-
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly storageService: DropboxStorageService,
+  ) {}
 
   /** ⏱ TEST: tanggal 29 jam 16:49 WIB (ganti ke '0 0 0 29 * *' untuk produksi) */
   @Cron('0 00 00 29 * *', { timeZone: 'Asia/Jakarta' })
   async cleanupOldImages(): Promise<CleanupStats> {
     const started = Date.now();
-
-    if (!this.blobToken && !this.dryRun) {
-      this.logger.error('BLOB_READ_WRITE_TOKEN missing. Abort cleanup.');
-      return { checked: 0, deleted: 0, blobErrors: 0, durationMs: 0 };
-    }
 
     // Cutoff = awal bulan WIB dikurangi (keepLastNMonths - 1) bulan
     const cutoff = startOfMonthWIBtoUTC(this.keepLastNMonths - 1);
@@ -122,21 +109,16 @@ export class CronjobService {
         await Promise.allSettled(
           slice.map(async (r) => {
             try {
-              const u = new URL(r.url);
-              if (!this.isAllowedBlobHost(u.hostname)) {
-                this.logger.warn(`Skip non-blob host: ${u.hostname} for id=${r.id}`);
-                return;
-              }
               if (this.dryRun) {
-                this.logger.debug(`[DRY] would delete blob: ${r.url}`);
+                this.logger.debug(`[DRY] would delete: ${r.url}`);
                 okIds.push(r.id);
                 return;
               }
-              await del(r.url, { token: this.blobToken });
+              await this.storageService.deleteFile(r.url);
               okIds.push(r.id);
             } catch (e) {
               blobErrors++;
-              this.logger.warn(`Blob delete failed id=${r.id} :: ${(e as Error)?.message || e}`);
+              this.logger.warn(`Delete failed id=${r.id} :: ${(e as Error)?.message || e}`);
             }
           }),
         );

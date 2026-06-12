@@ -6,8 +6,10 @@ import { memoryStorage } from 'multer';
 import { UserModule } from '../user/user.module';
 import { ClientsModule, Transport } from '@nestjs/microservices';
 import process from 'node:process';
+import { StorageModule } from '../storage/storage.module';
 @Module({
   imports: [
+    StorageModule,
     UserModule,
     ClientsModule.register([
       {
