@@ -1,5 +1,5 @@
 import { Injectable, Logger, BadRequestException } from '@nestjs/common';
-import { Dropbox } from 'dropbox';
+import { Dropbox, DropboxAuth } from 'dropbox';
 import { IStorageService } from './storage.interface';
 
 @Injectable()
@@ -9,15 +9,36 @@ export class DropboxStorageService implements IStorageService {
   private readonly basePath: string;
 
   constructor() {
+    const refreshToken = process.env.DROPBOX_REFRESH_TOKEN;
+    const clientId = process.env.DROPBOX_CLIENT_ID;
+    const clientSecret = process.env.DROPBOX_CLIENT_SECRET;
+
+    // Fallback ke access token lama (untuk backward compat, tapi akan expired 4 jam)
     const accessToken = process.env.DROPBOX_ACCESS_TOKEN;
-    if (!accessToken) {
-      throw new Error('DROPBOX_ACCESS_TOKEN is not set in environment variables');
+
+    if (!clientId || !clientSecret) {
+      throw new Error('DROPBOX_CLIENT_ID dan DROPBOX_CLIENT_SECRET wajib diisi di environment variables');
     }
 
-    this.dropbox = new Dropbox({ accessToken });
-    this.basePath = process.env.DROPBOX_FOLDER_PATH || '/task-manager-files';
+    if (refreshToken) {
+      // ✅ CARA BENAR: Pakai DropboxAuth dengan refresh token (tidak akan expired)
+      const auth = new DropboxAuth({
+        clientId,
+        clientSecret,
+        refreshToken,
+      });
+      this.dropbox = new Dropbox({ auth });
+      this.logger.log('DropboxStorageService initialized dengan REFRESH TOKEN (long-lived)');
+    } else if (accessToken) {
+      // ⚠️ FALLBACK: Access token sementara (expired dalam 4 jam!)
+      this.dropbox = new Dropbox({ accessToken });
+      this.logger.warn('⚠️  DropboxStorageService menggunakan ACCESS TOKEN sementara (akan expired ~4 jam). Segera set DROPBOX_REFRESH_TOKEN!');
+    } else {
+      throw new Error('DROPBOX_REFRESH_TOKEN atau DROPBOX_ACCESS_TOKEN harus diset di environment variables');
+    }
 
-    this.logger.log(`DropboxStorageService initialized with basePath: ${this.basePath}`);
+    this.basePath = process.env.DROPBOX_FOLDER_PATH || '/task-manager-files';
+    this.logger.log(`DropboxStorageService initialized dengan basePath: ${this.basePath}`);
   }
 
   async uploadFile(
@@ -39,44 +60,17 @@ export class DropboxStorageService implements IStorageService {
         contents: buffer,
         mode: { '.tag': 'add' },
         autorename: true,
-        mute: false, // Don't mute notifications for debugging
+        mute: false,
       });
 
       const uploadedPath = uploadResponse.result.path_display || fullPath;
       this.logger.debug(`File uploaded to Dropbox at: ${uploadedPath}`);
 
-      // Buat shared link agar file bisa diakses publik
-      let sharedUrl: string;
-      try {
-        const linkResponse = await this.dropbox.sharingCreateSharedLink({
-          path: uploadedPath,
-          short_url: false,
-        });
-        sharedUrl = linkResponse.result.url;
-        this.logger.debug(`Shared link created: ${sharedUrl}`);
-      } catch (linkError: any) {
-        // Jika link sudah ada, error "shared_link_already_exists"
-        if (linkError?.error?.error?.['.tag'] === 'shared_link_already_exists') {
-          this.logger.debug(`Shared link already exists, fetching existing link...`);
-          // Get existing shared link
-          const listResponse = await this.dropbox.sharingListSharedLinks({
-            path: uploadedPath,
-          });
-          if (listResponse.result.links.length === 0) {
-            throw new Error('Failed to get existing shared link');
-          }
-          sharedUrl = listResponse.result.links[0].url;
-        } else {
-          this.logger.error(`Failed to create shared link:`, linkError);
-          throw linkError;
-        }
-      }
+      // Buat atau ambil shared link
+      const sharedUrl = await this.getOrCreateSharedLink(uploadedPath);
 
       // Convert Dropbox preview URL ke direct download URL
-      // Dari: https://www.dropbox.com/scl/fi/xxx/filename.jpg?rlkey=xxx&dl=0
-      // Ke: https://dl.dropbox.com/scl/fi/xxx/filename.jpg?rlkey=xxx&raw=1
-      const directUrl = sharedUrl.replace('www.dropbox.com', 'dl.dropbox.com').replace('?dl=0', '&raw=1');
-
+      const directUrl = this.toDirectUrl(sharedUrl);
       this.logger.log(`File uploaded successfully: ${directUrl}`);
 
       return {
@@ -95,7 +89,6 @@ export class DropboxStorageService implements IStorageService {
       // Kalau path adalah URL, extract path-nya
       let dropboxPath = path;
       if (path.startsWith('http')) {
-        // Extract dari URL Dropbox
         // Format: https://dl.dropbox.com/scl/fi/xxx/path/file.jpg?rlkey=xxx&raw=1
         const url = new URL(path);
         const pathParts = url.pathname.split('/').slice(4); // Remove /scl/fi/xxx/
@@ -124,7 +117,7 @@ export class DropboxStorageService implements IStorageService {
       this.logger.log(`File deleted successfully: ${dropboxPath}`);
     } catch (error: any) {
       // Ignore jika file tidak ditemukan
-      if (error?.error?.error?.['.tag'] === 'path_lookup' && 
+      if (error?.error?.error?.['.tag'] === 'path_lookup' &&
           error?.error?.error?.path_lookup?.['.tag'] === 'not_found') {
         this.logger.warn(`File not found for deletion: ${path}`);
         return;
@@ -138,29 +131,74 @@ export class DropboxStorageService implements IStorageService {
   async getFileUrl(path: string): Promise<string> {
     try {
       const fullPath = path.startsWith(this.basePath) ? path : `${this.basePath}/${path}`;
-
-      let sharedUrl: string;
-      try {
-        const linkResponse = await this.dropbox.sharingCreateSharedLink({
-          path: fullPath,
-          short_url: false,
-        });
-        sharedUrl = linkResponse.result.url;
-      } catch (linkError: any) {
-        if (linkError?.error?.error?.['.tag'] === 'shared_link_already_exists') {
-          const listResponse = await this.dropbox.sharingListSharedLinks({
-            path: fullPath,
-          });
-          sharedUrl = listResponse.result.links[0].url;
-        } else {
-          throw linkError;
-        }
-      }
-
-      return sharedUrl.replace('www.dropbox.com', 'dl.dropbox.com').replace('?dl=0', '&raw=1');
+      const sharedUrl = await this.getOrCreateSharedLink(fullPath);
+      return this.toDirectUrl(sharedUrl);
     } catch (error: any) {
       this.logger.error(`Failed to get file URL: ${path}`, error?.message);
       throw new Error(`Failed to get file URL: ${error?.message || 'Unknown error'}`);
+    }
+  }
+
+  /**
+   * ✅ Helper: Buat shared link baru atau ambil yang sudah ada.
+   * Menggunakan API terbaru: sharingCreateSharedLinkWithSettings
+   * (sharingCreateSharedLink sudah deprecated)
+   */
+  private async getOrCreateSharedLink(filePath: string): Promise<string> {
+    try {
+      // ✅ Pakai API terbaru (bukan yang deprecated)
+      const linkResponse = await this.dropbox.sharingCreateSharedLinkWithSettings({
+        path: filePath,
+        settings: {
+          requested_visibility: { '.tag': 'public' },
+        },
+      });
+      this.logger.debug(`Shared link created: ${linkResponse.result.url}`);
+      return linkResponse.result.url;
+    } catch (linkError: any) {
+      // Jika link sudah ada, ambil yang existing
+      if (
+        linkError?.error?.error?.['.tag'] === 'shared_link_already_exists' ||
+        linkError?.error?.['.tag'] === 'shared_link_already_exists'
+      ) {
+        this.logger.debug(`Shared link already exists, fetching existing link...`);
+        const listResponse = await this.dropbox.sharingListSharedLinks({
+          path: filePath,
+          direct_only: true, // ✅ Hanya ambil link untuk file ini, bukan folder parent
+        });
+
+        if (!listResponse.result.links.length) {
+          throw new Error('Failed to get existing shared link');
+        }
+
+        this.logger.debug(`Found existing shared link: ${listResponse.result.links[0].url}`);
+        return listResponse.result.links[0].url;
+      }
+
+      this.logger.error(`Failed to create/get shared link:`, linkError);
+      throw linkError;
+    }
+  }
+
+  /**
+   * ✅ Convert Dropbox preview URL ke direct download URL dengan cara yang benar.
+   * Dari: https://www.dropbox.com/scl/fi/xxx/filename.jpg?rlkey=xxx&dl=0
+   * Ke:   https://dl.dropbox.com/scl/fi/xxx/filename.jpg?rlkey=xxx&raw=1
+   */
+  private toDirectUrl(sharedUrl: string): string {
+    try {
+      const url = new URL(sharedUrl);
+      // Ganti host ke dl.dropbox.com
+      url.hostname = 'dl.dropbox.com';
+      // Hapus param dl=0 dan tambahkan raw=1
+      url.searchParams.delete('dl');
+      url.searchParams.set('raw', '1');
+      return url.toString();
+    } catch {
+      // Fallback ke string replace jika URL parsing gagal
+      return sharedUrl
+        .replace('www.dropbox.com', 'dl.dropbox.com')
+        .replace(/[?&]dl=0/, (match) => (match.startsWith('?') ? '?raw=1' : '&raw=1'));
     }
   }
 }
