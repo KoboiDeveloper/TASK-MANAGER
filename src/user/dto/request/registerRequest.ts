@@ -5,31 +5,20 @@ import {
   IsStrongPassword,
   Matches,
   IsEmail,
-  IsArray,
-  ValidateNested,
   IsEnum,
   IsBoolean,
   Length,
+  MinLength,
+  IsOptional,
 } from 'class-validator';
-import { Type } from 'class-transformer';
+import { Transform } from 'class-transformer';
 import { ERole } from '../../../constant/ERole';
-
-class StoreIdDto {
-  @IsNotEmpty({ message: 'Store tidak boleh kosong' })
-  @IsString({ message: 'Store harus berupa string' })
-  storeId: string;
-}
-
-class RegionIdDto {
-  @IsNotEmpty({ message: 'Region tidak boleh kosong' })
-  @IsString({ message: 'Region harus berupa string' })
-  regionId: string;
-}
 
 export class RegisterRequest {
   @IsNotEmpty({ message: 'NIK tidak boleh kosong' })
   @IsString({ message: 'NIK harus berupa angka' })
-  @Length(7, 9, { message: 'NIK harus 8 karakter' })
+  @MaxLength(8, { message: 'NIK maksimal 8 karakter' })
+  @MinLength(8, { message: 'NIK minimal 8 karakter' })
   nik: string;
 
   @IsNotEmpty({ message: 'Nama tidak boleh kosong' })
@@ -52,21 +41,33 @@ export class RegisterRequest {
   )
   password: string;
 
-  @IsNotEmpty({ message: 'Nomor telepon tidak boleh kosong' })
+  @IsOptional()
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' && value.trim() === '' ? undefined : value,
+  )
   @Matches(/^[0-9]{10,13}$/, {
     message: 'Nomor telepon harus terdiri dari 10–13 digit angka dan hanya angka',
   })
-  noTelp: string;
+  noTelp?: string;
 
-  @IsNotEmpty({ message: 'Email tidak boleh kosong' })
+  @IsOptional()
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' && value.trim() === '' ? undefined : value,
+  )
   @IsEmail({}, { message: 'Format email tidak valid' })
-  email: string;
+  email?: string;
 
   @IsNotEmpty({ message: 'Status Active tidak boleh kosong' })
+  @Transform(({ value }: { value: unknown }): boolean =>
+    typeof value === 'string' ? value.toLowerCase() === 'true' : Boolean(value),
+  )
   @IsBoolean()
   statusActive: boolean;
 
   @IsNotEmpty({ message: 'Handle Web tidak boleh kosong' })
+  @Transform(({ value }: { value: unknown }): boolean =>
+    typeof value === 'string' ? value.toLowerCase() === 'true' : Boolean(value),
+  )
   @IsBoolean()
   handleWeb: boolean;
 
@@ -74,13 +75,19 @@ export class RegisterRequest {
   @IsEnum(ERole, { message: 'Role tidak valid' })
   roleId: ERole;
 
-  @IsArray({ message: 'Format accessStore tidak valid' })
-  @ValidateNested({ each: true })
-  @Type(() => StoreIdDto)
-  accessStoreIds: StoreIdDto[];
+  @IsOptional()
+  @IsString({ message: 'Photo harus berupa string' })
+  photo?: string;
 
-  @IsArray({ message: 'Format accessRegion tidak valid' })
-  @ValidateNested({ each: true })
-  @Type(() => RegionIdDto)
-  accessRegionIds: RegionIdDto[];
+  @IsOptional()
+  @IsString({ message: 'Color harus berupa string' })
+  color?: string;
+
+  @IsOptional()
+  @IsString({ message: 'Departement harus berupa string' })
+  departement?: string;
+
+  @IsOptional()
+  @IsString({ message: 'Departemen harus berupa string' })
+  departemen?: string;
 }

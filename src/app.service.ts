@@ -5,6 +5,7 @@ import { encodePassword } from './utils/bcrypt';
 import { RoleService } from './role/role.service';
 import { ERole } from './constant/ERole';
 import { EProjectRole } from './constant/EProjectRole';
+import { generateColorFromString } from './utils/color';
 
 @Injectable()
 export class AppService implements OnModuleInit {
@@ -48,6 +49,7 @@ export class AppService implements OnModuleInit {
           email: adminEmail,
           roleId: superRole.id,
           statusActive: true,
+          photo: generateColorFromString(adminNama),
         },
       });
 
@@ -76,6 +78,15 @@ export class AppService implements OnModuleInit {
         },
       });
     }
+
+    await this.prismaService.dT_ROLE.deleteMany({
+      where: {
+        id: {
+          notIn: allRoles.map((r) => r.toString()),
+        },
+      },
+    });
+
     this.logger.log('✅ Roles are registered (or already exist)');
   }
 

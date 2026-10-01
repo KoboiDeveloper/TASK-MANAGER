@@ -5,40 +5,47 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { DT_USER, Prisma } from '@prisma/client';
+import { DT_USER } from '@prisma/client';
 import { ERole } from '../constant/ERole';
-import { StoreService } from '../store/store.service';
 import { RoleService } from '../role/role.service';
 import { RegisterRequest } from './dto/request/registerRequest';
 import { RegisterResponse } from '../auth/dto/response/registerResponse';
 import { comparePassword, encodePassword } from '../utils/bcrypt';
 import { RequestUpdateUser } from './dto/request/requestUpdateUser';
 import { ConfigService } from '@nestjs/config';
-import { ResponseListUsersDto, ResponseUserContains } from './dto/response-users.dto';
+import { EmpHRIS, ResponseListUsersDto, ResponseUserContains } from './dto/response-users.dto';
+import { DropboxStorageService } from '../storage/dropbox.storage.service';
+import { assertImageFile, getOriginalName, safeUserPhotoPath } from '../utils/file';
+import { generateColorFromString } from '../utils/color';
 
 interface IuserService {
-  create(data: RegisterRequest): Promise<RegisterResponse>;
-  updateUser(nik: string, data: RequestUpdateUser): Promise<void>;
+  create(data: RegisterRequest, file?: Express.Multer.File): Promise<RegisterResponse>;
+  updateUser(nik: string, data: RequestUpdateUser, file?: Express.Multer.File): Promise<void>;
   findAll(): Promise<ResponseListUsersDto[]>;
+  findAllPaginated(
+    limit: number,
+    offset: number,
+    search?: string,
+  ): Promise<{ data: ResponseListUsersDto[]; total: number; hasMore: boolean }>;
   findAdmin(): Promise<{ nik: string; nama: string }[]>;
   isActive(nik: string): Promise<boolean>;
   resetPassword(nik: string): Promise<void>;
+  deleteUser(nik: string): Promise<void>;
   findOne(nik: string): Promise<DT_USER>;
+  UsrHRIS(search?: string, limit?: number, offset?: number): Promise<{ data: EmpHRIS[]; hasMore: boolean }>;
 }
 
 @Injectable()
 export class UserService implements IuserService {
-  private storeAccessRoles: ERole[] = [ERole.SC, ERole.SPVJ, ERole.SPV, ERole.CASHIER];
-  private regionAccessRoles: ERole[] = [ERole.AC];
   constructor(
     private readonly prismaService: PrismaService,
-    private readonly storeService: StoreService,
     private readonly roleService: RoleService,
     private readonly configService: ConfigService,
+    private readonly storageService: DropboxStorageService,
   ) {}
 
   async findAll(): Promise<ResponseListUsersDto[]> {
-    return await this.prismaService.dT_USER.findMany({
+    const users = await this.prismaService.dT_USER.findMany({
       select: {
         nik: true,
         nama: true,
@@ -47,18 +54,62 @@ export class UserService implements IuserService {
         roleId: true,
         statusActive: true,
         handleWeb: true,
-        accessStoreIds: {
-          select: {
-            storeId: true,
-          },
-        },
-        accessRegionIds: {
-          select: {
-            regionId: true,
-          },
-        },
+        photo: true,
+        departement: true,
       },
     });
+
+    return users.map((u) => ({
+      ...u,
+      departemen: u.departement,
+    }));
+  }
+
+  async findAllPaginated(
+    limit: number,
+    offset: number,
+    search?: string,
+  ): Promise<{ data: ResponseListUsersDto[]; total: number; hasMore: boolean }> {
+    const whereClause: any = {};
+    if (search && search.trim()) {
+      const q = search.trim();
+      whereClause.OR = [
+        { nik: { contains: q } },
+        { nama: { contains: q } },
+        { email: { contains: q } },
+        { departement: { contains: q } },
+      ];
+    }
+
+    const [total, users] = await Promise.all([
+      this.prismaService.dT_USER.count({ where: whereClause }),
+      this.prismaService.dT_USER.findMany({
+        where: whereClause,
+        skip: offset,
+        take: limit,
+        orderBy: { nik: 'asc' },
+        select: {
+          nik: true,
+          nama: true,
+          noTelp: true,
+          email: true,
+          roleId: true,
+          statusActive: true,
+          handleWeb: true,
+          photo: true,
+          departement: true,
+        },
+      }),
+    ]);
+
+    return {
+      data: users.map((u) => ({
+        ...u,
+        departemen: u.departement,
+      })),
+      total,
+      hasMore: offset + users.length < total,
+    };
   }
   async findAdmin(): Promise<{ nik: string; nama: string }[]> {
     return await this.prismaService.dT_USER.findMany({
@@ -73,7 +124,48 @@ export class UserService implements IuserService {
       },
     });
   }
-  async create(data: RegisterRequest): Promise<RegisterResponse> {
+
+  async UsrHRIS(search?: string, limit = 10, offset = 0): Promise<{ data: EmpHRIS[]; hasMore: boolean }> {
+    const keyword = search ? `%${search}%` : `%`;
+
+    const fetchLimit = limit + 1; // fetch 1 extra to detect hasMore
+
+    const data = await this.prismaService.$queryRaw<EmpHRIS[]>`
+      SELECT
+        t1.NomorIndukStr as nik, 
+        t1.NamaLengkapStr as name,
+        (
+          SELECT TOP 1 td.DepartemenStr
+          FROM hris.dbo.tblpegawaijabatan tj
+          LEFT JOIN hris.dbo.tbldepartemen td ON tj.DepartemenIDLng = td.DepartemenIDLng
+          WHERE tj.PegawaiIDLng = t1.PegawaiIDLng
+          ORDER BY tj.PegawaiJabatanIDLng DESC
+        ) as department
+      FROM hris.dbo.tblpegawai t1
+      WHERE (t1.NomorIndukStr LIKE ${keyword} OR t1.NamaLengkapStr LIKE ${keyword})
+      ORDER BY t1.NamaLengkapStr ASC
+      OFFSET ${offset} ROWS
+      FETCH NEXT ${fetchLimit} ROWS ONLY
+  `;
+
+    const current = await this.findAll();
+    const dtNikList = current.map((x) => x.nik);
+
+    const hasMore = data.length > limit;
+    const sliced = hasMore ? data.slice(0, limit) : data;
+
+    return {
+      data: sliced.map((emp) => ({
+        nik: emp.nik,
+        name: emp.name,
+        department: emp.department,
+        status: dtNikList.includes(emp.nik),
+      })),
+      hasMore,
+    };
+  }
+
+  async create(data: RegisterRequest, file?: Express.Multer.File): Promise<RegisterResponse> {
     const existingUser = await this.prismaService.dT_USER.findUnique({
       where: { nik: data.nik },
     });
@@ -86,8 +178,26 @@ export class UserService implements IuserService {
     const getRole = await this.roleService.getOrSave(data.roleId);
     const hashedPassword = encodePassword(data.password);
 
-    await this.validateStoreAccess(data.roleId, data.accessStoreIds);
-    await this.validateRegionAccess(data.roleId, data.accessRegionIds);
+    // Tentukan nilai photo: jika ada file upload -> simpan URL Dropbox, jika ada hex warna -> simpan hex, jika tidak ada -> generate hex dari nama
+    let photoValue: string;
+    if (file) {
+      assertImageFile(file);
+      const pathname = safeUserPhotoPath(getOriginalName(file), data.nik);
+      const uploaded = await this.storageService.uploadFile(
+        pathname,
+        file.buffer,
+        file.mimetype || 'application/octet-stream',
+      );
+      photoValue = uploaded.url;
+    } else if (data.photo && data.photo.trim()) {
+      photoValue = data.photo.trim();
+    } else if (data.color && data.color.trim()) {
+      photoValue = data.color.trim();
+    } else {
+      photoValue = generateColorFromString(data.nama);
+    }
+
+    const dept = data.departement || data.departemen || null;
 
     return this.prismaService.$transaction(async (tx) => {
       const newUser = await tx.dT_USER.create({
@@ -95,30 +205,29 @@ export class UserService implements IuserService {
           nik: data.nik,
           nama: data.nama,
           password: hashedPassword,
-          noTelp: data.noTelp,
-          email: data.email,
+          noTelp: data.noTelp || null,
+          email: data.email || null,
           roleId: getRole.id,
           statusActive: data.statusActive,
           handleWeb: data.handleWeb,
+          photo: photoValue,
+          departement: dept,
         },
       });
-
-      if (this.storeAccessRoles.includes(data.roleId) && data.accessStoreIds?.length) {
-        await this.handleStoreAccess(tx, newUser.nik, data.accessStoreIds);
-      }
-
-      if (this.regionAccessRoles.includes(data.roleId) && data.accessRegionIds?.length) {
-        await this.handleRegionAccess(tx, newUser.nik, data.accessRegionIds);
-      }
 
       return {
         nik: newUser.nik,
         nama: newUser.nama,
         role: newUser.roleId,
+        photo: newUser.photo,
       };
     });
   }
-  async updateUser(nik: string, data: RequestUpdateUser): Promise<void> {
+  async updateUser(
+    nik: string,
+    data: RequestUpdateUser,
+    file?: Express.Multer.File,
+  ): Promise<void> {
     const existingUser = await this.prismaService.dT_USER.findUnique({ where: { nik } });
     if (!existingUser) throw new ConflictException('User tidak ditemukan');
 
@@ -140,8 +249,23 @@ export class UserService implements IuserService {
 
     const getRole = await this.roleService.getOrSave(data.roleId);
 
-    await this.validateStoreAccess(data.roleId, data.accessStoreIds);
-    await this.validateRegionAccess(data.roleId, data.accessRegionIds);
+    let photoUpdate: string | undefined;
+    if (file) {
+      assertImageFile(file);
+      const pathname = safeUserPhotoPath(getOriginalName(file), nik);
+      const uploaded = await this.storageService.uploadFile(
+        pathname,
+        file.buffer,
+        file.mimetype || 'application/octet-stream',
+      );
+      photoUpdate = uploaded.url;
+    } else if (data.photo && data.photo.trim()) {
+      photoUpdate = data.photo.trim();
+    } else if (data.color && data.color.trim()) {
+      photoUpdate = data.color.trim();
+    }
+
+    const deptUpdate = data.departement !== undefined ? data.departement : data.departemen;
 
     await this.prismaService.$transaction(async (tx) => {
       // update data user dasar
@@ -149,25 +273,15 @@ export class UserService implements IuserService {
         where: { nik },
         data: {
           nama: data.nama,
-          noTelp: data.noTelp,
-          email: data.email,
+          noTelp: data.noTelp ? data.noTelp : null,
+          email: data.email ? data.email : null,
           roleId: getRole.id,
           statusActive: data.statusActive,
           handleWeb: data.handleWeb,
+          ...(photoUpdate !== undefined ? { photo: photoUpdate } : {}),
+          ...(deptUpdate !== undefined ? { departement: deptUpdate } : {}),
         },
       });
-
-      // reset akses store & region
-      await tx.dT_ACCESS_STORE.deleteMany({ where: { userNik: nik } });
-      await tx.dT_ACCESS_REGION.deleteMany({ where: { userNik: nik } });
-
-      // reassign sesuai role
-      if (this.storeAccessRoles.includes(data.roleId)) {
-        await this.handleStoreAccess(tx, nik, data.accessStoreIds);
-      }
-      if (this.regionAccessRoles.includes(data.roleId)) {
-        await this.handleRegionAccess(tx, nik, data.accessRegionIds);
-      }
     });
   }
 
@@ -221,6 +335,11 @@ export class UserService implements IuserService {
       where: {
         nik: { contains: nik },
       },
+      select: {
+        nik: true,
+        nama: true,
+        photo: true,
+      },
     });
     if (!user) throw new NotFoundException('User tidak ditemukan');
     return user;
@@ -235,72 +354,24 @@ export class UserService implements IuserService {
     });
   }
 
-  //helper
-  private async validateStoreAccess(roleId: ERole, accessStoreIds?: { storeId: string }[]) {
-    if (this.storeAccessRoles.includes(roleId)) {
-      if (!accessStoreIds || accessStoreIds.length === 0) {
-        throw new ConflictException('Access stores are required for this role');
-      }
-
-      const inputStoreIds = accessStoreIds.map((s) => s.storeId);
-      const existingStores = await this.storeService.findMany(inputStoreIds);
-      const validStoreIds = existingStores.map((s) => s.id);
-      const invalidStoreIds = inputStoreIds.filter((id) => !validStoreIds.includes(id));
-
-      if (invalidStoreIds.length > 0) {
-        throw new ConflictException(`Store tidak ditemukan: ${invalidStoreIds.join(', ')}`);
-      }
+  async deleteUser(nik: string): Promise<void> {
+    const user = await this.prismaService.dT_USER.findUnique({
+      where: { nik },
+    });
+    if (!user) {
+      throw new NotFoundException('User tidak ditemukan');
     }
-  }
 
-  private async validateRegionAccess(roleId: ERole, accessRegionIds?: { regionId: string }[]) {
-    if (this.regionAccessRoles.includes(roleId)) {
-      if (!accessRegionIds || accessRegionIds.length === 0) {
-        throw new ConflictException('Access regions are required for this role');
-      }
-
-      const inputRegionIds = accessRegionIds.map((r) => r.regionId);
-      const existingRegions = await this.prismaService.dT_REGION.findMany({
-        where: { id: { in: inputRegionIds } },
-        select: { id: true },
-      });
-
-      const validRegionIds = existingRegions.map((r) => r.id);
-      const invalidRegionIds = inputRegionIds.filter((id) => !validRegionIds.includes(id));
-
-      if (invalidRegionIds.length > 0) {
-        throw new ConflictException(`Region tidak ditemukan: ${invalidRegionIds.join(', ')}`);
-      }
-    }
-  }
-
-  private async handleStoreAccess(
-    tx: Prisma.TransactionClient,
-    userNik: string,
-    accessStoreIds: { storeId: string }[],
-  ) {
-    if (!accessStoreIds?.length) return;
-
-    const storesData = accessStoreIds.map((store) => ({
-      userNik,
-      storeId: store.storeId,
-    }));
-
-    await tx.dT_ACCESS_STORE.createMany({ data: storesData });
-  }
-
-  private async handleRegionAccess(
-    tx: Prisma.TransactionClient,
-    userNik: string,
-    accessRegionIds: { regionId: string }[],
-  ) {
-    if (!accessRegionIds?.length) return;
-
-    const regionsData = accessRegionIds.map((region) => ({
-      userNik,
-      regionId: region.regionId,
-    }));
-
-    await tx.dT_ACCESS_REGION.createMany({ data: regionsData });
+    await this.prismaService.$transaction([
+      this.prismaService.lOG_FORGOT_PASSWORD.deleteMany({ where: { nik } }),
+      this.prismaService.lOG_ACTIVITY.deleteMany({ where: { nik } }),
+      this.prismaService.dT_MEMBER_PROJECT.deleteMany({ where: { nik } }),
+      this.prismaService.dT_ASSIGNEE_TASK.deleteMany({ where: { nik } }),
+      this.prismaService.dT_ASSIGNEE_SUBTASK.deleteMany({ where: { nik } }),
+      this.prismaService.lOG_INVITATION_PROJECT.deleteMany({
+        where: { OR: [{ sender: nik }, { to: nik }] },
+      }),
+      this.prismaService.dT_USER.delete({ where: { nik } }),
+    ]);
   }
 }

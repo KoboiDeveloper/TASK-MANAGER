@@ -1,4 +1,3 @@
-// src/ticket/ticket.controller.ts
 import {
   Body,
   Controller,
@@ -6,6 +5,7 @@ import {
   HttpStatus,
   Param,
   Post,
+  Query,
   UploadedFiles,
   UseGuards,
   UseInterceptors,
@@ -36,8 +36,44 @@ export class TicketController {
   @UseGuards(AuthGuard)
   @Roles('SUPER')
   @Get()
-  async getTickets() {
+  async getTickets(
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+    @Query('search') search?: string,
+    @Query('ticketId') ticketId?: string,
+    @Query('idStore') idStore?: string,
+    @Query('storeId') storeId?: string,
+    @Query('handlerNik') handlerNik?: string,
+    @Query('handler') handler?: string,
+    @Query('status') status?: string,
+  ) {
     try {
+      if (
+        limit !== undefined ||
+        offset !== undefined ||
+        search !== undefined ||
+        ticketId !== undefined ||
+        idStore !== undefined ||
+        storeId !== undefined ||
+        handlerNik !== undefined ||
+        handler !== undefined ||
+        status !== undefined
+      ) {
+        const limitNum = Math.min(Number(limit) || 50, 100);
+        const offsetNum = Math.max(Number(offset) || 0, 0);
+        const targetHandler = handlerNik || handler;
+        const targetStore = idStore || storeId;
+        const data = await this.ticketService.getTicketsPaginated(
+          limitNum,
+          offsetNum,
+          targetHandler,
+          search,
+          status,
+          ticketId,
+          targetStore,
+        );
+        return new CommonResponse('Ticket List', HttpStatus.OK, data);
+      }
       const data = await this.ticketService.getTickets();
       return new CommonResponse('Ticket List', HttpStatus.OK, data);
     } catch (e) {
@@ -60,8 +96,45 @@ export class TicketController {
   @UseGuards(AuthGuard)
   @Roles('SUPER', 'ADMIN')
   @Get('/:nik')
-  async getTicketByUser(@Param('nik') nik: string) {
+  async getTicketByUser(
+    @Param('nik') nik: string,
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+    @Query('search') search?: string,
+    @Query('ticketId') ticketId?: string,
+    @Query('idStore') idStore?: string,
+    @Query('storeId') storeId?: string,
+    @Query('status') status?: string,
+    @Query('handlerNik') handlerNik?: string,
+    @Query('handler') handler?: string,
+  ) {
     try {
+      if (
+        limit !== undefined ||
+        offset !== undefined ||
+        search !== undefined ||
+        ticketId !== undefined ||
+        idStore !== undefined ||
+        storeId !== undefined ||
+        status !== undefined ||
+        handlerNik !== undefined ||
+        handler !== undefined
+      ) {
+        const limitNum = Math.min(Number(limit) || 50, 100);
+        const offsetNum = Math.max(Number(offset) || 0, 0);
+        const targetHandler = nik || handlerNik || handler;
+        const targetStore = idStore || storeId;
+        const data = await this.ticketService.getTicketsPaginated(
+          limitNum,
+          offsetNum,
+          targetHandler,
+          search,
+          status,
+          ticketId,
+          targetStore,
+        );
+        return new CommonResponse('Ticket List', HttpStatus.OK, data);
+      }
       const data = await this.ticketService.getTicketByNik(nik);
       return new CommonResponse('Ticket List', HttpStatus.OK, data);
     } catch (e) {
@@ -125,6 +198,18 @@ export class TicketController {
     try {
       const res: string = await this.ticketService.pendingTicket(body.ticketId, body.reason);
       return new CommonResponse('Ticket status Pending Successfully ', HttpStatus.OK, res);
+    } catch (e) {
+      return handleException((e as Error).message);
+    }
+  }
+
+  @UseGuards(AuthGuard)
+  @Roles('SUPER', 'ADMIN')
+  @Post('cancel')
+  async cancelTicket(@Body() body: { ticketId: string; reason: string }) {
+    try {
+      const res: string = await this.ticketService.cancelTicket(body.ticketId, body.reason);
+      return new CommonResponse('Ticket Cancelled Successfully', HttpStatus.OK, res);
     } catch (e) {
       return handleException((e as Error).message);
     }

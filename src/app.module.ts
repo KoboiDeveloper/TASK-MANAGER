@@ -7,8 +7,6 @@ import { PrismaModule } from './prisma/prisma.module';
 import { ConfigModule } from '@nestjs/config';
 import { MailModule } from './utils/mail/mail.module';
 import { RoleModule } from './role/role.module';
-import { StoreModule } from './store/store.module';
-import { RegionModule } from './region/region.module';
 import { TicketModule } from './ticket/ticket.module';
 import { ProjectModule } from './project/project.module';
 import { CronjobModule } from './utils/cronjob/cronjob.module';
@@ -25,8 +23,6 @@ import { ScheduleModule } from '@nestjs/schedule';
     PrismaModule,
     MailModule,
     RoleModule,
-    StoreModule,
-    RegionModule,
     TicketModule,
     ProjectModule,
     CronjobModule,

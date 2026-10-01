@@ -1,11 +1,11 @@
 import { Module } from '@nestjs/common';
 import { UserService } from './user.service';
 import { UserController } from './user.controller';
-import { StoreModule } from '../store/store.module';
 import { RoleModule } from '../role/role.module';
+import { StorageModule } from '../storage/storage.module';
 
 @Module({
-  imports: [StoreModule, RoleModule],
+  imports: [RoleModule, StorageModule],
   controllers: [UserController],
   providers: [UserService],
   exports: [UserService],

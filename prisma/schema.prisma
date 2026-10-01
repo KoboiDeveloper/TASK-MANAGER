@@ -11,15 +11,15 @@ model DT_USER {
   nik          String  @id @db.Char(8)
   nama         String  @db.VarChar(40)
   password     String  @db.VarChar(100)
-  noTelp       String  @db.VarChar(13)
-  email        String  @db.VarChar(30)
+  noTelp       String? @db.VarChar(13)
+  email        String? @db.VarChar(30)
   roleId       String  @db.VarChar(20)
   handleWeb    Boolean @default(false)
   statusActive Boolean
+  photo        String? @db.VarChar(500)
+  departement  String? @db.VarChar(50)
 
   //relation
-  accessRegionIds    DT_ACCESS_REGION[]
-  accessStoreIds     DT_ACCESS_STORE[]
   role               DT_ROLE                  @relation(fields: [roleId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   forgotPasswords    LOG_FORGOT_PASSWORD[]
   ticketsHandled     DT_TICKET[]              @relation("TicketHandler")
@@ -32,50 +32,6 @@ model DT_USER {
   logs               LOG_ACTIVITY[]
   sentInvites        LOG_INVITATION_PROJECT[] @relation("SenderInvites")
   receivedInvites    LOG_INVITATION_PROJECT[] @relation("ReceiverInvites")
-}
-
-model DT_ACCESS_REGION {
-  id       String    @id @default(uuid()) @db.UniqueIdentifier
-  userNik  String    @db.Char(8)
-  regionId String    @db.VarChar(20) // ✅ sama persis dengan DT_REGION.id
-  region   DT_REGION @relation(fields: [regionId], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  user     DT_USER   @relation(fields: [userNik], references: [nik], onDelete: NoAction, onUpdate: NoAction)
-
-  @@unique([userNik, regionId])
-  @@index([userNik])
-  @@index([regionId])
-}
-
-model DT_ACCESS_STORE {
-  id      String   @id @default(uuid()) @db.UniqueIdentifier
-  userNik String   @db.Char(8)
-  storeId String   @db.VarChar(10) // ✅ sama persis dengan DT_STORE.id
-  store   DT_STORE @relation(fields: [storeId], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  user    DT_USER  @relation(fields: [userNik], references: [nik], onDelete: NoAction, onUpdate: NoAction)
-
-  @@unique([userNik, storeId])
-  @@index([userNik])
-  @@index([storeId])
-}
-
-model DT_REGION {
-  id     String             @id @db.VarChar(20)
-  region String             @db.VarChar(30)
-  access DT_ACCESS_REGION[]
-  stores DT_STORE[]
-}
-
-model DT_STORE {
-  id           String            @id @db.VarChar(10)
-  brand        String            @db.VarChar(30)
-  address      String?           @db.VarChar(100)
-  statusActive Boolean
-  regionId     String            @db.VarChar(20) // ✅ samakan dengan DT_REGION.id
-  users        DT_ACCESS_STORE[]
-  region       DT_REGION         @relation(fields: [regionId], references: [id], onDelete: NoAction, onUpdate: NoAction)
-
-  @@index([statusActive])
-  @@index([regionId])
 }
 
 model DT_ROLE {
@@ -93,7 +49,7 @@ model DT_TICKET {
   noTelp      String  @db.VarChar(15)
   category    String  @db.VarChar(20)
   status      String  @db.VarChar(15)
-  reason      String? @db.VarChar(60)
+  reason      String? @db.VarChar(255)
   description String  @db.VarChar(255)
 
   fromPayment     String? @db.VarChar(20)
@@ -147,9 +103,13 @@ model LOG_FORGOT_PASSWORD {
 model DT_PROJECT {
   id        String   @id @default(uuid()) @db.UniqueIdentifier
   name      String   @db.VarChar(100)
-  desc      String?  @db.VarChar(255)
-  color     String?  @db.VarChar(30)
-  createdBy String   @db.Char(8)
+  desc              String?  @db.VarChar(255)
+  color             String?  @db.VarChar(30)
+  icon              String?  @db.NVarChar(500)
+  views             String?  @db.NVarChar(500)
+  isPrivate         Boolean  @default(false)
+  defaultPermission String   @default("EDITOR") @db.VarChar(20)
+  createdBy         String   @db.Char(8)
   createdAt DateTime @default(now())
   isArchive Boolean  @default(false)
   user      DT_USER  @relation("CreatedProjects", fields: [createdBy], references: [nik], onDelete: NoAction, onUpdate: NoAction)

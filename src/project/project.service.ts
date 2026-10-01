@@ -68,13 +68,31 @@ export class ProjectService {
   }
 
   async create(creatorNik: string, data: CreateProjectRequest): Promise<string> {
-    const { name, desc = null, members = [] } = data;
-    const color = this.generateColorFromString(name);
+    const {
+      name,
+      desc = null,
+      members = [],
+      icon = null,
+      views = null,
+      isPrivate = false,
+      defaultPermission = 'EDITOR',
+      sections = [],
+    } = data;
+    const color = data.color || this.generateColorFromString(name);
 
-    // 1) Buat project + OWNER dalam satu transaksi
+    // 1) Buat project + OWNER + sections dalam satu transaksi
     const projectId = await this.prismaService.$transaction(async (tx) => {
       const project = await tx.dT_PROJECT.create({
-        data: { name, color, desc, createdBy: creatorNik },
+        data: {
+          name,
+          color,
+          icon,
+          views,
+          isPrivate,
+          defaultPermission,
+          desc,
+          createdBy: creatorNik,
+        },
       });
 
       // creator selalu jadi OWNER
@@ -85,6 +103,24 @@ export class ProjectService {
           id_dt_project_role: EProjectRole.OWNER,
         },
       });
+
+      // Jika ada sections dari create project (workflow), buat sections
+      if (Array.isArray(sections) && sections.length > 0) {
+        let currentRank = '8000000000000000';
+        for (const sec of sections) {
+          const secName = typeof sec === 'string' ? sec : sec?.name;
+          if (secName && secName.trim()) {
+            await tx.dT_SECTION.create({
+              data: {
+                id_dt_project: project.id,
+                name: secName.trim(),
+                rank: currentRank,
+              },
+            });
+            currentRank = this.rankAfter(currentRank);
+          }
+        }
+      }
 
       // anggota lain TIDAK dibuat di sini, supaya semua logika diff dipegang syncProjectMembers
       return project.id;
@@ -107,17 +143,31 @@ export class ProjectService {
   }
 
   async updateProjectById(id: string, data: UpdateProjectRequest): Promise<string> {
-    const { name, desc, isArchive, members } = data;
+    const { name, desc, isArchive, members, color, icon, views, isPrivate, defaultPermission } = data;
 
     try {
       // 1) Update field project-nya (kalau ada yg dikirim)
-      if (name !== undefined || desc !== undefined || isArchive !== undefined) {
+      if (
+        name !== undefined ||
+        desc !== undefined ||
+        isArchive !== undefined ||
+        color !== undefined ||
+        icon !== undefined ||
+        views !== undefined ||
+        isPrivate !== undefined ||
+        defaultPermission !== undefined
+      ) {
         await this.prismaService.dT_PROJECT.update({
           where: { id },
           data: {
             ...(name !== undefined ? { name } : {}),
             ...(desc !== undefined ? { desc } : {}),
             ...(isArchive !== undefined ? { isArchive } : {}),
+            ...(color !== undefined ? { color } : {}),
+            ...(icon !== undefined ? { icon } : {}),
+            ...(views !== undefined ? { views } : {}),
+            ...(isPrivate !== undefined ? { isPrivate } : {}),
+            ...(defaultPermission !== undefined ? { defaultPermission } : {}),
           },
         });
       }
@@ -1155,14 +1205,14 @@ export class ProjectService {
     desc: string | null;
     dueDate: Date | null;
     status: boolean;
-    assignees: { user: { nik: string; nama: string } }[];
+    assignees: { user: { nik: string; nama: string; photo?: string | null } }[];
     creator: { nama: string } | null;
     subTask?: {
       id: string;
       name: string;
       dueDate: Date | null;
       status: boolean;
-      assignees: { user: { nik: string; nama: string } }[];
+      assignees: { user: { nik: string; nama: string; photo?: string | null } }[];
     }[];
   }): TaskNonSection {
     return {
@@ -1175,6 +1225,7 @@ export class ProjectService {
       assignees: (t.assignees ?? []).map((a) => ({
         nik: a.user.nik,
         nama: a.user.nama,
+        photo: a.user.photo ?? null,
       })),
 
       creator: { nama: t.creator?.nama ?? '' },
@@ -1189,6 +1240,7 @@ export class ProjectService {
             st.assignees?.map((sa) => ({
               nik: sa.user.nik,
               nama: sa.user.nama,
+              photo: sa.user.photo ?? null,
             })) ?? [],
         })) ?? [],
     };
@@ -1208,6 +1260,7 @@ export class ProjectService {
             select: {
               nik: true,
               nama: true,
+              photo: true,
             },
           },
         },
@@ -1240,6 +1293,7 @@ export class ProjectService {
                 select: {
                   nik: true,
                   nama: true,
+                  photo: true,
                 },
               },
             },
@@ -1504,11 +1558,19 @@ export class ProjectService {
         id: true,
         name: true,
         desc: true,
+        color: true,
+        icon: true,
+        views: true,
+        isPrivate: true,
+        defaultPermission: true,
+        createdBy: true,
+        createdAt: true,
+        isArchive: true,
         members: {
           select: {
             nik: true,
             roleProject: { select: { name: true } },
-            user: { select: { nama: true } },
+            user: { select: { nama: true, photo: true } },
           },
         },
         activities: true,
@@ -1520,12 +1582,21 @@ export class ProjectService {
       nik: m.nik.trim(),
       role: m.roleProject?.name ?? null,
       nama: m.user?.nama ?? null,
+      photo: m.user?.photo ?? null,
     }));
 
     return {
       id: project.id,
       name: project.name,
       desc: project.desc,
+      color: project.color,
+      icon: project.icon,
+      views: project.views,
+      isPrivate: project.isPrivate,
+      defaultPermission: project.defaultPermission,
+      createdBy: project.createdBy,
+      createdAt: project.createdAt,
+      isArchive: project.isArchive,
       members: formattedMembers,
       activities: project.activities,
     };

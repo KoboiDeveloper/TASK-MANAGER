@@ -310,6 +310,94 @@ export class TicketService {
     });
   }
 
+  async getTicketsPaginated(
+    limit: number,
+    offset: number,
+    handlerNik?: string,
+    search?: string,
+    status?: string,
+    ticketId?: string,
+    idStore?: string,
+  ): Promise<{ data: TicketListResponseDto[]; total: number; hasMore: boolean }> {
+    const where: any = {};
+    if (ticketId && ticketId.trim()) {
+      where.id = { contains: ticketId.trim() };
+    }
+    if (idStore && idStore.trim()) {
+      where.idStore = { contains: idStore.trim() };
+    }
+    if (handlerNik && handlerNik.trim()) {
+      const handlerList = handlerNik.split(',').map((h) => h.trim()).filter(Boolean);
+      if (handlerList.length === 1) {
+        where.handlerNik = handlerList[0];
+      } else if (handlerList.length > 1) {
+        where.handlerNik = { in: handlerList };
+      }
+    }
+    if (status && status.trim()) {
+      const statusList = status.split(',').map((s) => s.trim()).filter(Boolean);
+      if (statusList.length === 1) {
+        where.status = statusList[0];
+      } else if (statusList.length > 1) {
+        where.status = { in: statusList };
+      }
+    }
+    if (search && search.trim()) {
+      const q = search.trim();
+      where.OR = [
+        { id: { contains: q } },
+        { idStore: { contains: q } },
+        { noTelp: { contains: q } },
+        { category: { contains: q } },
+        { description: { contains: q } },
+        { billCode: { contains: q } },
+        { idtv: { contains: q } },
+        { handler: { nama: { contains: q } } },
+      ];
+    }
+
+    const [total, tickets] = await Promise.all([
+      this.prismaService.dT_TICKET.count({ where }),
+      this.prismaService.dT_TICKET.findMany({
+        where,
+        skip: offset,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+        select: {
+          id: true,
+          idStore: true,
+          noTelp: true,
+          category: true,
+          status: true,
+          description: true,
+          fromPayment: true,
+          toPayment: true,
+          isDirectSelling: true,
+          billCode: true,
+          grandTotal: true,
+          completedBy: { select: { nama: true } },
+          idtv: true,
+          reason: true,
+          completedAt: true,
+          createdAt: true,
+          handler: { select: { nik: true, nama: true, noTelp: true } },
+          images: {
+            select: {
+              id: true,
+              url: true,
+            },
+          },
+        },
+      }),
+    ]);
+
+    return {
+      data: tickets,
+      total,
+      hasMore: offset + tickets.length < total,
+    };
+  }
+
   async reassignTicket(ticketId: string, nik: string): Promise<string> {
     await this.prismaService.dT_TICKET.update({
       where: {
@@ -337,12 +425,12 @@ export class TicketService {
       _count: { _all: true },
     });
 
-    // 2) totalCompleted per handlerNik
-    const totalCompleted = await this.prismaService.dT_TICKET.groupBy({
+    // 2) totalQueued per handlerNik (hanya status QUEUED, pending/cancelled/completed tidak dihitung)
+    const totalQueued = await this.prismaService.dT_TICKET.groupBy({
       by: ['handlerNik'],
       where: {
         handlerNik: { in: niks },
-        status: EStatus.COMPLETED, // status string: 'COMPLETED'
+        status: EStatus.QUEUED,
       },
       _count: { _all: true },
     });
@@ -351,18 +439,18 @@ export class TicketService {
     const mapAll = new Map<string, number>();
     for (const row of totalAll) mapAll.set(row.handlerNik, row._count._all);
 
-    const mapCompleted = new Map<string, number>();
-    for (const row of totalCompleted) mapCompleted.set(row.handlerNik, row._count._all);
+    const mapQueued = new Map<string, number>();
+    for (const row of totalQueued) mapQueued.set(row.handlerNik, row._count._all);
 
     // Merge ke list ADMIN; user tanpa tiket tetap muncul (0)
     const result: UserTicketSummaryDto[] = admins.map((s) => {
       const all = mapAll.get(s.nik) ?? 0;
-      const done = mapCompleted.get(s.nik) ?? 0;
+      const queued = mapQueued.get(s.nik) ?? 0;
       return {
         nik: s.nik,
         name: s.nama,
         totalAll: all,
-        uncompleted: Math.max(0, all - done),
+        uncompleted: queued,
       };
     });
 
@@ -534,5 +622,22 @@ export class TicketService {
       },
     });
     return `Ticket ${ticketId} berhasil di-hold`;
+  }
+
+  async cancelTicket(ticketId: string, reason: string): Promise<string> {
+    const ticket = await this.prismaService.dT_TICKET.findUnique({
+      where: { id: ticketId },
+    });
+
+    if (!ticket) throw new NotFoundException('Ticket tidak ditemukan');
+
+    await this.prismaService.dT_TICKET.update({
+      where: { id: ticketId },
+      data: {
+        status: EStatus.CANCELLED,
+        reason: reason,
+      },
+    });
+    return `Ticket ${ticketId} berhasil dibatalkan`;
   }
 }

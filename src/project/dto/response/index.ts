@@ -4,18 +4,28 @@ export type ProjectMemberFlat = {
   nik: string;
   role: string;
   nama: string;
+  photo?: string | null;
 };
 
 export type ProjectDetail = {
   id: string;
   name: string;
   desc: string | null;
+  color?: string | null;
+  icon?: string | null;
+  views?: string | null;
+  isPrivate?: boolean;
+  defaultPermission?: string;
+  createdBy?: string;
+  createdAt?: Date;
+  isArchive?: boolean;
   members: ProjectMemberFlat[];
   activities: LOG_ACTIVITY[] | null;
 };
 type Assignees = {
   nik: string;
   nama: string;
+  photo?: string | null;
 };
 export type SubTask = {
   id: string;
@@ -59,7 +69,7 @@ export type ownTaskResponse = {
   status: boolean;
   dueDate: Date | null;
   project: {
-    id:string;
+    id: string;
     name: string;
     color: string | null;
   };

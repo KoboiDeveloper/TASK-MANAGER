@@ -1,16 +1,25 @@
 export class ResponseListUsersDto {
   nik: string;
   nama: string;
-  noTelp: string;
-  email: string;
+  noTelp: string | null;
+  email: string | null;
   roleId: string;
   statusActive: boolean;
   handleWeb: boolean;
-  accessRegionIds: { regionId: string }[];
-  accessStoreIds: { storeId: string }[];
+  photo: string | null;
+  departement?: string | null;
+  departemen?: string | null;
 }
 
 export class ResponseUserContains {
   nik: string;
   nama: string;
+  photo: string | null;
 }
+
+export type EmpHRIS = {
+  nik: string;
+  name: string;
+  department?: string;
+  status: boolean;
+};

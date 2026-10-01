@@ -4,4 +4,5 @@ export enum EStatus {
   COMPLETED = 'COMPLETED',
   PENDING = 'PENDING',
   FAILED = 'FAILED',
+  CANCELLED = 'CANCELLED',
 }

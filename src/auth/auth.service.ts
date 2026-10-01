@@ -21,8 +21,6 @@ interface JwtPayload {
   nik: string;
   nama: string;
   roleId: string;
-  accessStores: string[];
-  accessRegions: string[];
 }
 
 interface IAuthService {
@@ -42,10 +40,6 @@ export class AuthService implements IAuthService {
   async validateUser(data: LoginRequest): Promise<LoginResponse> {
     const user = await this.prismaService.dT_USER.findUnique({
       where: { nik: data.nik },
-      include: {
-        accessStoreIds: { select: { storeId: true } },
-        accessRegionIds: { select: { regionId: true } },
-      },
     });
 
     if (!user || !(await comparePassword(data.password, user.password))) {
@@ -60,8 +54,6 @@ export class AuthService implements IAuthService {
       nik: user.nik,
       nama: user.nama,
       roleId: user.roleId,
-      accessStores: user.accessStoreIds.map((s) => s.storeId),
-      accessRegions: user.accessRegionIds.map((r) => r.regionId),
     };
 
     const token = await this.jwtService.signAsync(payload);
@@ -117,6 +109,7 @@ export class AuthService implements IAuthService {
           nik: true,
           nama: true,
           roleId: true,
+          photo: true,
           memberProjects: {
             orderBy: { projectId: 'asc' },
             select: {
@@ -141,6 +134,7 @@ export class AuthService implements IAuthService {
         nik: dbUser.nik,
         nama: dbUser.nama,
         roleId: dbUser.roleId,
+        photo: dbUser.photo,
         memberProjects: dbUser.memberProjects.map((mp) => ({
           projectId: mp.projectId,
           name: mp.project.name,

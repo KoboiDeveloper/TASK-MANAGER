@@ -1,14 +1,18 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   HttpStatus,
   Param,
   Patch,
   Post,
+  Query,
   Res,
+  UploadedFiles,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
 import { UserService } from './user.service';
 import { CommonResponse } from '../common/commonResponse';
@@ -21,15 +25,54 @@ import { ResponseListUsersDto, ResponseUserContains } from './dto/response-users
 import { ChangePasswordDto } from './dto/request/requestChangePassword';
 import { OwnerGuard } from '../security/own-guard';
 import { Response } from 'express';
+import { FileFieldsInterceptor } from '@nestjs/platform-express';
+import multer from 'multer';
 
 @UseGuards(AuthGuard)
 @Controller('api/users')
 export class UserController {
   constructor(private readonly userService: UserService) {}
+
+  @Roles('SUPER')
+  @Get('/hris')
+  async getHris(
+    @Query('search') search?: string,
+    @Query('limit') limit?: string,
+    @Query('page') page?: string,
+  ) {
+    try {
+      const limitNum = Math.min(Number(limit) || 10, 50);
+      const pageNum = Math.max(Number(page) || 1, 1);
+      const offset = (pageNum - 1) * limitNum;
+
+      const usrResponse = await this.userService.UsrHRIS(search, limitNum, offset);
+
+      return new CommonResponse('HRIS List', HttpStatus.OK, usrResponse);
+    } catch ({ message }) {
+      return handleException(message as string);
+    }
+  }
+
   @Roles('SUPER')
   @Get()
-  async findAll() {
+  async findAll(
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+    @Query('page') page?: string,
+    @Query('search') search?: string,
+  ) {
     try {
+      if (limit !== undefined || offset !== undefined || page !== undefined) {
+        const limitNum = Math.min(Number(limit) || 10, 100);
+        let offsetNum = Number(offset);
+        if (isNaN(offsetNum)) {
+          const pageNum = Math.max(Number(page) || 1, 1);
+          offsetNum = (pageNum - 1) * limitNum;
+        }
+        const result = await this.userService.findAllPaginated(limitNum, offsetNum, search);
+        return new CommonResponse('Users List', HttpStatus.OK, result);
+      }
+
       const userResponse: ResponseListUsersDto[] = await this.userService.findAll();
       return new CommonResponse('Users List', HttpStatus.OK, userResponse);
     } catch ({ message }) {
@@ -50,20 +93,50 @@ export class UserController {
   @Roles('SUPER')
   @Post('/add')
   @HttpCode(HttpStatus.CREATED)
-  async register(@Body() request: RegisterRequest) {
+  @UseInterceptors(
+    FileFieldsInterceptor(
+      [
+        { name: 'photo', maxCount: 1 },
+        { name: 'file', maxCount: 1 },
+      ],
+      { storage: multer.memoryStorage() },
+    ),
+  )
+  async register(
+    @Body() request: RegisterRequest,
+    @UploadedFiles()
+    files?: { photo?: Express.Multer.File[]; file?: Express.Multer.File[] },
+  ) {
     try {
-      const result = await this.userService.create(request);
+      const photoFile = files?.photo?.[0] || files?.file?.[0];
+      const result = await this.userService.create(request, photoFile);
       return new CommonResponse('Register Successfully', HttpStatus.CREATED, result);
     } catch ({ message }) {
       return handleException(message as string);
     }
   }
+
   @Roles('SUPER')
   @Patch('/update/:nik')
   @HttpCode(HttpStatus.OK)
-  async update(@Param('nik') nik: string, @Body() requestUpdateUser: RequestUpdateUser) {
+  @UseInterceptors(
+    FileFieldsInterceptor(
+      [
+        { name: 'photo', maxCount: 1 },
+        { name: 'file', maxCount: 1 },
+      ],
+      { storage: multer.memoryStorage() },
+    ),
+  )
+  async update(
+    @Param('nik') nik: string,
+    @Body() requestUpdateUser: RequestUpdateUser,
+    @UploadedFiles()
+    files?: { photo?: Express.Multer.File[]; file?: Express.Multer.File[] },
+  ) {
     try {
-      const result = await this.userService.updateUser(nik, requestUpdateUser);
+      const photoFile = files?.photo?.[0] || files?.file?.[0];
+      const result = await this.userService.updateUser(nik, requestUpdateUser, photoFile);
       return new CommonResponse('Update Successfully', HttpStatus.OK, result);
     } catch ({ message }) {
       return handleException(message as string);
@@ -76,6 +149,18 @@ export class UserController {
     try {
       await this.userService.resetPassword(nik);
       return new CommonResponse('Update Successfully', HttpStatus.OK, null);
+    } catch ({ message }) {
+      return handleException(message as string);
+    }
+  }
+
+  @Roles('SUPER')
+  @Delete('/:nik')
+  @HttpCode(HttpStatus.OK)
+  async deleteUser(@Param('nik') nik: string) {
+    try {
+      await this.userService.deleteUser(nik);
+      return new CommonResponse('Delete User Successfully', HttpStatus.OK, null);
     } catch ({ message }) {
       return handleException(message as string);
     }

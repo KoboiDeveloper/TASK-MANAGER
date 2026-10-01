@@ -28,8 +28,44 @@ export class CreateProjectRequest {
   @MaxLength(500)
   desc?: string;
 
+  @IsString()
+  @IsOptional()
+  @MaxLength(30)
+  color?: string;
+
+  @IsOptional()
+  @Transform(({ value }) => {
+    if (typeof value === 'object' && value !== null) {
+      return JSON.stringify(value);
+    }
+    return value;
+  })
+  icon?: string;
+
+  @IsOptional()
+  @Transform(({ value }) => {
+    if (typeof value === 'object' && value !== null) {
+      return JSON.stringify(value);
+    }
+    return value;
+  })
+  views?: string;
+
+  @IsBoolean()
+  @IsOptional()
+  isPrivate?: boolean;
+
+  @IsString()
+  @IsOptional()
+  @MaxLength(20)
+  defaultPermission?: string;
+
   @IsOptional()
   members?: Member[];
+
+  @IsOptional()
+  @IsArray()
+  sections?: Array<{ name: string; rank?: string }>;
 }
 
 export class UpdateProjectRequest {
@@ -42,6 +78,38 @@ export class UpdateProjectRequest {
   @IsOptional()
   @MaxLength(500)
   desc?: string;
+
+  @IsString()
+  @IsOptional()
+  @MaxLength(30)
+  color?: string;
+
+  @IsOptional()
+  @Transform(({ value }) => {
+    if (typeof value === 'object' && value !== null) {
+      return JSON.stringify(value);
+    }
+    return value;
+  })
+  icon?: string;
+
+  @IsOptional()
+  @Transform(({ value }) => {
+    if (typeof value === 'object' && value !== null) {
+      return JSON.stringify(value);
+    }
+    return value;
+  })
+  views?: string;
+
+  @IsBoolean()
+  @IsOptional()
+  isPrivate?: boolean;
+
+  @IsString()
+  @IsOptional()
+  @MaxLength(20)
+  defaultPermission?: string;
 
   @IsBoolean()
   @IsOptional()
