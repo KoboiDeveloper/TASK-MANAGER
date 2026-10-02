@@ -69,25 +69,60 @@ export class ProjectMemberGuard implements CanActivate {
     const body = req.body ?? {};
     const query = req.query ?? {};
 
-    // ✅ 3️⃣ Cari projectId dari berbagai sumber (hanya kalau GUID valid)
+    const resolveProjectGuid = async (val: unknown): Promise<string | null> => {
+      if (typeof val !== 'string' || !val.trim()) return null;
+      const clean = val.trim();
+      if (GUID_REGEX.test(clean)) return clean;
+      const found = await this.prisma.dT_PROJECT.findFirst({
+        where: { shortId: clean.toLowerCase() },
+        select: { id: true },
+      });
+      return found?.id ?? null;
+    };
+
+    const resolveTaskGuid = async (val: unknown): Promise<string | null> => {
+      if (typeof val !== 'string' || !val.trim()) return null;
+      const clean = val.trim();
+      if (GUID_REGEX.test(clean)) return clean;
+      const found = await this.prisma.dT_TASK.findFirst({
+        where: { shortId: clean.toLowerCase() },
+        select: { id: true },
+      });
+      return found?.id ?? null;
+    };
+
+    // ✅ 3️⃣ Cari projectId dari berbagai sumber (GUID atau ShortId)
     const candidateFromParams =
-      asGuidOrNull(params.projectId) ?? asGuidOrNull(params.idProject) ?? asGuidOrNull(params.id);
+      (await resolveProjectGuid(params.projectId)) ??
+      (await resolveProjectGuid(params.idProject)) ??
+      (await resolveProjectGuid(params.id));
 
-    const candidateFromBody = asGuidOrNull(body.projectId) ?? asGuidOrNull(body.idProject);
+    const candidateFromBody =
+      (await resolveProjectGuid(body.projectId)) ?? (await resolveProjectGuid(body.idProject));
 
-    const candidateFromQuery = asGuidOrNull(query.projectId) ?? asGuidOrNull(query.idProject);
+    const candidateFromQuery =
+      (await resolveProjectGuid(query.projectId)) ?? (await resolveProjectGuid(query.idProject));
 
     let projectId: string | null =
       candidateFromParams || candidateFromBody || candidateFromQuery || null;
 
-    // ✅ 4️⃣ Kalau belum ketemu, cari via taskId (yang valid GUID saja)
-    const taskId = asGuidOrNull(params.taskId);
+    // ✅ 4️⃣ Kalau belum ketemu, cari via taskId (GUID atau ShortId)
+    const taskId = await resolveTaskGuid(params.taskId);
+    if (taskId && params.taskId) {
+      params.taskId = taskId;
+    }
     if (!projectId && taskId) {
       const task = await this.prisma.dT_TASK.findUnique({
-        where: { id: taskId }, // id di DB = uniqueidentifier, kita pastikan taskId sudah GUID
+        where: { id: taskId },
         select: { id_dt_project: true },
       });
       projectId = asGuidOrNull(task?.id_dt_project);
+    }
+
+    if (projectId) {
+      if (params.projectId) params.projectId = projectId;
+      if (params.idProject) params.idProject = projectId;
+      if (params.id && req.baseUrl.includes('projects')) params.id = projectId;
     }
 
     // ✅ 5️⃣ Kalau belum juga, cari via subtaskId (yang valid GUID saja)

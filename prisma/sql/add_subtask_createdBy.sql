@@ -1,0 +1,9 @@
+-- Run in order (SQL Server needs separate batches for new column):
+--   1) add_subtask_createdBy_1_column.sql
+--   2) add_subtask_createdBy_2_backfill.sql
+--
+-- npx prisma db execute --schema prisma/schema.prisma --file prisma/sql/add_subtask_createdBy_1_column.sql
+-- npx prisma db execute --schema prisma/schema.prisma --file prisma/sql/add_subtask_createdBy_2_backfill.sql
+--
+-- createdAt already exists on DT_SUB_TASK — no change.
+-- createdBy is nullable; existing rows are backfilled from parent task.createdBy.

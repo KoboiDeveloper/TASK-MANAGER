@@ -137,9 +137,13 @@ export class Member {
 // TASK DTO
 // =========================================================
 export class CreateTaskProjectRequest {
-  @IsUUID()
+  @IsString()
   @IsOptional()
   section?: string;
+
+  @IsString()
+  @IsOptional()
+  id_dt_view?: string;
 
   @IsString()
   @IsNotEmpty()
@@ -222,6 +226,15 @@ export class UpdateTaskRequest {
   @ValidateNested({ each: true })
   @Type(() => AssigneeDto)
   assignees?: AssigneeDto[];
+
+  @IsOptional()
+  @Transform(({ value }) => {
+    if (typeof value === 'object' && value !== null) {
+      return JSON.stringify(value);
+    }
+    return value;
+  })
+  customFields?: string;
 }
 
 // =========================================================
@@ -255,6 +268,15 @@ export class UpdateSubTaskRequest {
   @IsBoolean()
   @IsOptional()
   status?: boolean;
+
+  @IsOptional()
+  @Transform(({ value }) => {
+    if (typeof value === 'object' && value !== null) {
+      return JSON.stringify(value);
+    }
+    return value;
+  })
+  customFields?: string;
 }
 
 export class SyncSubTaskAssigneeRequest {
@@ -274,4 +296,100 @@ export class MemberRequest {
   @IsEnum(EProjectRole)
   @IsNotEmpty()
   roleId!: EProjectRole;
+}
+
+export class CreateViewRequest {
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(100)
+  name!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(50)
+  type!: string;
+
+  @IsOptional()
+  @Transform(({ value }) => {
+    if (typeof value === 'object' && value !== null) {
+      return JSON.stringify(value);
+    }
+    return value;
+  })
+  settings?: string;
+}
+
+export class UpdateViewRequest {
+  @IsString()
+  @IsOptional()
+  @MaxLength(100)
+  name?: string;
+
+  @IsString()
+  @IsOptional()
+  @MaxLength(50)
+  type?: string;
+
+  @IsOptional()
+  @Transform(({ value }) => {
+    if (typeof value === 'object' && value !== null) {
+      return JSON.stringify(value);
+    }
+    return value;
+  })
+  settings?: string;
+}
+
+export class MoveViewRequest {
+  @IsString()
+  @IsOptional()
+  beforeId?: string | null;
+
+  @IsString()
+  @IsOptional()
+  afterId?: string | null;
+}
+
+export class MoveSubTaskRequest {
+  @IsString()
+  @IsOptional()
+  beforeId?: string | null;
+
+  @IsString()
+  @IsOptional()
+  afterId?: string | null;
+
+  @IsString()
+  @IsOptional()
+  targetTaskId?: string | null;
+}
+
+/** Promote subtask → standalone task (neighbors are tasks) */
+export class PromoteSubTaskRequest {
+  @IsString()
+  @IsOptional()
+  targetSectionId?: string | null;
+
+  @IsString()
+  @IsOptional()
+  beforeId?: string | null;
+
+  @IsString()
+  @IsOptional()
+  afterId?: string | null;
+}
+
+/** Demote task → subtask under another task (neighbors are subtasks) */
+export class DemoteTaskRequest {
+  @IsString()
+  @IsNotEmpty()
+  targetTaskId!: string;
+
+  @IsString()
+  @IsOptional()
+  beforeId?: string | null;
+
+  @IsString()
+  @IsOptional()
+  afterId?: string | null;
 }

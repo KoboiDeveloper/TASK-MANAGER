@@ -7,13 +7,24 @@ export type ProjectMemberFlat = {
   photo?: string | null;
 };
 
+export type ViewItem = {
+  id: string;
+  projectId: string;
+  name: string;
+  type: string;
+  rank: string;
+  shortId?: string | null;
+  settings?: string | null;
+};
+
 export type ProjectDetail = {
   id: string;
+  shortId?: string | null;
   name: string;
   desc: string | null;
   color?: string | null;
   icon?: string | null;
-  views?: string | null;
+  views?: ViewItem[] | string | null;
   isPrivate?: boolean;
   defaultPermission?: string;
   createdBy?: string;
@@ -32,7 +43,12 @@ export type SubTask = {
   name: string;
   dueDate: Date | null;
   status: boolean;
+  doneDate?: Date | string | null;
+  createdAt?: Date | string | null;
+  createdBy?: string | null;
+  creator?: { nik?: string; nama: string; photo?: string | null } | null;
   assignees: Assignees[];
+  customFields?: string | null;
 };
 
 export type AttachmentTask = {
@@ -45,13 +61,19 @@ export type AttachmentTask = {
 
 export type TaskNonSection = {
   id: string;
+  shortId?: string | null;
   name: string;
   desc: string | null;
   dueDate: Date | null;
   status: boolean;
+  doneDate?: Date | string | null;
+  createdAt?: Date | string | null;
+  id_dt_view?: string | null;
+  view?: { id: string; name: string; type: string; shortId?: string | null } | null;
   assignees: Assignees[];
-  creator: { nama: string };
+  creator: { nik?: string; nama: string; photo?: string | null };
   subTask: SubTask[];
+  customFields?: string | null;
 };
 export type SectionGroup = {
   id: string;
@@ -65,11 +87,13 @@ export type TaskSectionResponse = {
 
 export type ownTaskResponse = {
   id: string;
+  shortId?: string | null;
   name: string;
   status: boolean;
   dueDate: Date | null;
   project: {
     id: string;
+    shortId?: string | null;
     name: string;
     color: string | null;
   };

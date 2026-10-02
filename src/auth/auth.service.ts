@@ -117,6 +117,7 @@ export class AuthService implements IAuthService {
                 select: {
                   name: true,
                   color: true,
+                  shortId: true,
                 },
               },
               projectId: true,
@@ -136,7 +137,7 @@ export class AuthService implements IAuthService {
         roleId: dbUser.roleId,
         photo: dbUser.photo,
         memberProjects: dbUser.memberProjects.map((mp) => ({
-          projectId: mp.projectId,
+          projectId: mp.project?.shortId || mp.projectId,
           name: mp.project.name,
           color: mp.project.color,
           roleProject: mp.roleProject?.name ?? '',

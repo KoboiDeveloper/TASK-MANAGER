@@ -26,6 +26,7 @@ model DT_USER {
   ticketsCompletedBy DT_TICKET[]              @relation("TicketCompletedBy")
   createdProjects    DT_PROJECT[]             @relation("CreatedProjects")
   createdTasks       DT_TASK[]                @relation("CreatedTasks")
+  createdSubTasks    DT_SUB_TASK[]            @relation("CreatedSubTasks")
   memberProjects     DT_MEMBER_PROJECT[]
   assignedTasks      DT_ASSIGNEE_TASK[]       @relation("AssigneeTaskUser")
   assignedSubTasks   DT_ASSIGNEE_SUBTASK[]    @relation("AssigneeSubTaskUser")
@@ -106,21 +107,41 @@ model DT_PROJECT {
   desc              String?  @db.VarChar(255)
   color             String?  @db.VarChar(30)
   icon              String?  @db.NVarChar(500)
-  views             String?  @db.NVarChar(500)
   isPrivate         Boolean  @default(false)
   defaultPermission String   @default("EDITOR") @db.VarChar(20)
   createdBy         String   @db.Char(8)
   createdAt DateTime @default(now())
   isArchive Boolean  @default(false)
+  shortId   String?  @unique @db.VarChar(12)
   user      DT_USER  @relation("CreatedProjects", fields: [createdBy], references: [nik], onDelete: NoAction, onUpdate: NoAction)
 
   // Relasi ke data lain
   members     DT_MEMBER_PROJECT[]
+  views       DT_VIEWS[]
   sections    DT_SECTION[] // Cascade dari Project → Section
   tasks       DT_TASK[] // NoAction (hindari cyclic cascade)
   tags        DT_TAG[]                 @relation("ProjectTags")
   activities  LOG_ACTIVITY[]
   invitations LOG_INVITATION_PROJECT[]
+}
+
+/// ================================
+///  PROJECT VIEWS
+/// ================================
+model DT_VIEWS {
+  id        String     @id @default(uuid()) @db.UniqueIdentifier
+  projectId String     @db.UniqueIdentifier
+  name      String     @db.VarChar(100)
+  type      String     @db.VarChar(50)
+  rank      String     @default("8000000000000000") @db.VarChar(32)
+  shortId   String?    @unique @db.VarChar(12)
+  settings  String?    @db.NVarChar(Max)
+
+  // Relasi
+  project DT_PROJECT @relation(fields: [projectId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  tasks   DT_TASK[]
+
+  @@index([projectId])
 }
 
 /// ================================
@@ -157,16 +178,21 @@ model DT_TASK {
   desc          String?            @db.VarChar(100)
   dueDate       DateTime?
   status        Boolean            @default(false)
+  doneDate      DateTime?
   createdAt     DateTime           @default(now())
   id_dt_project String             @db.UniqueIdentifier
   id_dt_section String?            @db.UniqueIdentifier
+  id_dt_view    String?            @db.UniqueIdentifier
   assignees     DT_ASSIGNEE_TASK[]
 
   rank String? @db.VarChar(16)
+  shortId String? @unique @db.VarChar(12)
+  customFields String? @db.NVarChar(Max)
 
   project     DT_PROJECT           @relation(fields: [id_dt_project], references: [id], onDelete: NoAction, onUpdate: NoAction)
   creator     DT_USER              @relation("CreatedTasks", fields: [createdBy], references: [nik], onDelete: NoAction, onUpdate: NoAction)
   section     DT_SECTION?          @relation(fields: [id_dt_section], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  view        DT_VIEWS?            @relation(fields: [id_dt_view], references: [id], onDelete: NoAction, onUpdate: NoAction)
   attachments DT_TASK_ATTACHMENT[] @relation("TaskAttachment")
   subTask     DT_SUB_TASK[]
   tags        DT_TAG[]
@@ -174,6 +200,7 @@ model DT_TASK {
 
   @@index([id_dt_project])
   @@index([id_dt_section])
+  @@index([id_dt_view])
   @@index([rank])
   @@index([createdBy])
 }
@@ -196,16 +223,23 @@ model DT_TASK_ATTACHMENT {
 ///  SUBTASK
 /// ================================
 model DT_SUB_TASK {
-  id         String                @id @default(uuid()) @db.UniqueIdentifier
-  name       String                @db.VarChar(100)
-  id_dt_task String                @db.UniqueIdentifier
-  dueDate    DateTime?
-  createdAt  DateTime              @default(now())
-  rank       String?               @db.VarChar(16)
-  status     Boolean               @default(false)
+  id           String                @id @default(uuid()) @db.UniqueIdentifier
+  name         String                @db.VarChar(100)
+  id_dt_task   String                @db.UniqueIdentifier
+  // Nullable so existing rows stay intact; backfill from parent task.createdBy
+  createdBy    String?               @db.Char(8)
+  dueDate      DateTime?
+  doneDate     DateTime?
+  createdAt    DateTime              @default(now())
+  rank         String?               @db.VarChar(16)
+  status       Boolean               @default(false)
+  customFields String?               @db.NVarChar(Max)
   // Relations
-  task       DT_TASK               @relation(fields: [id_dt_task], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  assignees  DT_ASSIGNEE_SUBTASK[]
+  task         DT_TASK               @relation(fields: [id_dt_task], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  creator      DT_USER?              @relation("CreatedSubTasks", fields: [createdBy], references: [nik], onDelete: NoAction, onUpdate: NoAction)
+  assignees    DT_ASSIGNEE_SUBTASK[]
+
+  @@index([createdBy])
 }
 
 /// ================================
