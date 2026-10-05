@@ -18,7 +18,15 @@ import {
   UpdateSubTaskRequest,
   UpdateTaskRequest,
 } from './dto/request';
-import { DT_PROJECT, DT_SECTION, DT_SUB_TASK, DT_TAG, DT_TASK, DT_VIEWS, Prisma } from '@prisma/client';
+import {
+  DT_PROJECT,
+  DT_SECTION,
+  DT_SUB_TASK,
+  DT_TAG,
+  DT_TASK,
+  DT_VIEWS,
+  Prisma,
+} from '@prisma/client';
 import {
   ProjectDetail,
   ProjectMemberFlat,
@@ -27,11 +35,14 @@ import {
   TaskSectionResponse,
   AttachmentTask,
   ownTaskResponse,
+  ActivityResponse,
 } from './dto/response';
 import { UserService } from '../user/user.service';
 import { MailService } from '../utils/mail/mail.service';
 import { EProjectRole } from '../constant/EProjectRole';
 import { DropboxStorageService } from '../storage/dropbox.storage.service';
+import { ProjectGateway } from './project.gateway';
+import { CronjobService } from '../utils/cronjob/cronjob.service';
 
 @Injectable()
 export class ProjectService {
@@ -42,6 +53,8 @@ export class ProjectService {
     private readonly userService: UserService,
     private readonly mailService: MailService,
     private readonly storageService: DropboxStorageService,
+    private readonly projectGateway: ProjectGateway,
+    private readonly cronjobService: CronjobService,
   ) {}
 
   // =========================================================
@@ -151,18 +164,34 @@ export class ProjectService {
         let currentRank = '8000000000000000';
         for (const sec of sections) {
           const secName = typeof sec === 'string' ? sec : sec?.name;
+          const secCategory =
+            typeof sec === 'object' && (sec as any)?.category
+              ? (sec as any).category
+              : /complete|done|selesai|closed/i.test(secName || '')
+                ? 'done'
+                : 'active';
           if (secName && secName.trim()) {
             await tx.dT_SECTION.create({
               data: {
                 id_dt_project: project.id,
                 name: secName.trim(),
                 rank: currentRank,
+                category: secCategory,
               },
             });
             currentRank = this.rankAfter(currentRank);
           }
         }
       }
+
+      await tx.lOG_ACTIVITY.create({
+        data: {
+          projectId: project.id,
+          nik: creatorNik,
+          action: 'PROJECT_CREATED',
+          details: JSON.stringify({ projectName: project.name }),
+        },
+      });
 
       // anggota lain TIDAK dibuat di sini, supaya semua logika diff dipegang syncProjectMembers
       return { id: project.id, shortId: project.shortId };
@@ -184,7 +213,7 @@ export class ProjectService {
     return projectId.shortId || projectId.id;
   }
 
-  async updateProjectById(id: string, data: UpdateProjectRequest): Promise<string> {
+  async updateProjectById(id: string, data: UpdateProjectRequest, nik?: string): Promise<string> {
     const pid = (await this.resolveProjectId(id)) || id;
     const { name, desc, isArchive, members, color, icon, isPrivate, defaultPermission } = data;
 
@@ -211,6 +240,19 @@ export class ProjectService {
             ...(defaultPermission !== undefined ? { defaultPermission } : {}),
           },
         });
+
+        if (nik) {
+          const changes: Record<string, any> = {};
+          if (name !== undefined) changes.name = name;
+          if (desc !== undefined) changes.desc = desc;
+          if (isArchive !== undefined) changes.isArchive = isArchive;
+          await this.logActivity({
+            projectId: pid,
+            nik,
+            action: 'PROJECT_UPDATED',
+            details: changes,
+          });
+        }
       }
 
       // 2) Sync members kalau dikirim dari FE
@@ -281,15 +323,12 @@ export class ProjectService {
     const { name, desc, section, id_dt_view } = data;
 
     const pid =
-      (await this.resolveProjectId(projectId)) ||
-      this.normalizeGuid(projectId) ||
-      projectId;
+      (await this.resolveProjectId(projectId)) || this.normalizeGuid(projectId) || projectId;
 
     await this.ensureProjectExists(pid);
 
     let viewId = id_dt_view
-      ? (await this.resolveViewId(id_dt_view, pid)) ||
-        this.normalizeGuid(id_dt_view)
+      ? (await this.resolveViewId(id_dt_view, pid)) || this.normalizeGuid(id_dt_view)
       : null;
 
     if (!viewId) {
@@ -300,10 +339,7 @@ export class ProjectService {
       viewId = defaultView?.id ?? null;
     }
 
-    const sid =
-      section && section !== 'unlocated'
-        ? this.normalizeGuid(section)
-        : null;
+    const sid = section && section !== 'unlocated' ? this.normalizeGuid(section) : null;
 
     // Cari task dengan rank paling BESAR (paling bawah)
     const last = await this.prismaService.dT_TASK.findFirst({
@@ -342,6 +378,28 @@ export class ProjectService {
         rank: newRank,
         shortId: this.generateShortId(7),
       },
+    });
+
+    await this.logActivity({
+      projectId: pid,
+      taskid: task.id,
+      nik,
+      action: 'TASK_CREATED',
+      details: { taskName: task.name },
+    });
+
+    this.projectGateway.broadcastToProject(pid, 'task:created', {
+      taskId: task.shortId || task.id,
+      id: task.id,
+      shortId: task.shortId,
+      name: task.name,
+      desc: task.desc,
+      sectionId: task.id_dt_section,
+      rank: task.rank,
+      createdBy: task.createdBy,
+      createdAt: task.createdAt,
+      status: task.status,
+      id_dt_view: task.id_dt_view,
     });
 
     return task.shortId || task.id;
@@ -389,12 +447,12 @@ export class ProjectService {
     }));
   }
 
-  async updateTask(taskId: string, dto: UpdateTaskRequest): Promise<DT_TASK> {
+  async updateTask(taskId: string, dto: UpdateTaskRequest, nik?: string): Promise<DT_TASK> {
     const tid = (await this.resolveTaskId(taskId)) || taskId;
     // pastikan task ada
     const exists = await this.prismaService.dT_TASK.findUnique({
       where: { id: tid },
-      select: { id: true },
+      select: { id: true, name: true, status: true, id_dt_project: true, createdBy: true },
     });
     if (!exists) throw new NotFoundException(`Task ${taskId} not found`);
 
@@ -441,6 +499,18 @@ export class ProjectService {
       throw new BadRequestException('No valid fields to update');
     }
 
+    let newlyAssignedNiks: string[] = [];
+    if (assigneesProvided) {
+      const existingAssignees = await this.prismaService.dT_ASSIGNEE_TASK.findMany({
+        where: { taskId: tid },
+        select: { nik: true },
+      });
+      const existingNikSet = new Set(existingAssignees.map((a) => this.normalizeNik(a.nik)));
+      newlyAssignedNiks = (dto.assignees || [])
+        .map((a) => this.normalizeNik(a.nik))
+        .filter((n) => Boolean(n) && !existingNikSet.has(n));
+    }
+
     // transaksi: update scalar + reset assignees bila dikirim
     const updated = await this.prismaService.$transaction(async (tx) => {
       if (hasScalarUpdate) {
@@ -467,21 +537,106 @@ export class ProjectService {
         where: { id: tid },
         include: {
           section: true,
-          assignees: true,
+          assignees: {
+            include: {
+              user: {
+                select: { nik: true, nama: true, photo: true },
+              },
+            },
+          },
           tags: true,
         },
       });
     });
 
     if (!updated) throw new NotFoundException(`Task ${taskId} not found after update`);
+
+    if (updated.id_dt_project) {
+      const broadcastAssignees = updated.assignees
+        ? updated.assignees.map((a: any) => ({
+            nik: a.nik,
+            nama: a.user?.nama || a.nik,
+            photo: a.user?.photo || null,
+          }))
+        : undefined;
+
+      this.projectGateway.broadcastToProject(updated.id_dt_project, 'task:updated', {
+        taskId: updated.shortId || updated.id,
+        id: updated.id,
+        shortId: updated.shortId,
+        name: updated.name,
+        desc: updated.desc,
+        status: updated.status,
+        dueDate: updated.dueDate,
+        id_dt_section: updated.id_dt_section,
+        customFields: updated.customFields,
+        assignees: broadcastAssignees,
+      });
+
+      const actionUser = nik || updated.createdBy;
+      if (dto.status !== undefined && dto.status !== exists.status) {
+        await this.logActivity({
+          projectId: updated.id_dt_project,
+          taskid: updated.id,
+          nik: actionUser,
+          action: dto.status ? 'TASK_COMPLETED' : 'TASK_UNCOMPLETED',
+          details: { taskName: updated.name },
+        });
+      } else if (dto.name !== undefined && dto.name.trim() !== exists.name) {
+        await this.logActivity({
+          projectId: updated.id_dt_project,
+          taskid: updated.id,
+          nik: actionUser,
+          action: 'TASK_RENAMED',
+          details: { oldName: exists.name, newName: updated.name },
+        });
+      } else if (dto.dueDate !== undefined) {
+        await this.logActivity({
+          projectId: updated.id_dt_project,
+          taskid: updated.id,
+          nik: actionUser,
+          action: 'TASK_DUE_DATE_CHANGED',
+          details: { taskName: updated.name, dueDate: dto.dueDate },
+        });
+      }
+
+      // 1) Email jika ada user baru yang ditugaskan ke task ini
+      if (newlyAssignedNiks.length > 0) {
+        const targetNiks = newlyAssignedNiks.filter((n) => n !== actionUser);
+        if (targetNiks.length > 0) {
+          this.sendTaskAssignedEmailsAsync(
+            targetNiks,
+            updated.id_dt_project,
+            updated.shortId || updated.id,
+            updated.name,
+            actionUser,
+            updated.dueDate,
+            false,
+          ).catch((err) => this.logger.warn(`Failed sending task assigned emails: ${err}`));
+        }
+      }
+
+      // 2) Email milestone jika seluruh task di project telah selesai 100%
+      if (dto.status === true && exists.status === false) {
+        this.checkAndSendProjectCompletedEmailAsync(updated.id_dt_project).catch((err) =>
+          this.logger.warn(`Failed checking project completion email: ${err}`),
+        );
+      }
+    }
+
     return { ...updated, id: updated.shortId || updated.id };
   }
 
-  async deleteTaskId(taskId: string): Promise<string> {
+  async deleteTaskId(taskId: string, nik?: string): Promise<string> {
     const tid = (await this.resolveTaskId(taskId)) || this.normalizeGuid(taskId);
     if (!tid) {
       return `Task ${taskId} already deleted`;
     }
+    const existingTask = await this.prismaService.dT_TASK.findUnique({
+      where: { id: tid },
+      select: { id_dt_project: true, name: true, createdBy: true },
+    });
+
     try {
       // 1) Ambil semua attachment yang terkait task ini (sebelum transaksi)
       const attachments = await this.prismaService.dT_TASK_ATTACHMENT.findMany({
@@ -557,17 +712,38 @@ export class ProjectService {
         }),
       );
 
+      if (existingTask?.id_dt_project) {
+        this.projectGateway.broadcastToProject(existingTask.id_dt_project, 'task:deleted', {
+          taskId,
+          resolvedTaskId: tid,
+        });
+
+        await this.logActivity({
+          projectId: existingTask.id_dt_project,
+          nik: nik || existingTask.createdBy,
+          action: 'TASK_DELETED',
+          details: { taskName: existingTask.name },
+        });
+      }
+
       return `Task ${taskId} deleted`;
     } catch (e: unknown) {
       if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') {
         throw new NotFoundException(`Task ${taskId} not found`);
       }
-      this.logger.error(`Failed to delete task ${taskId} (resolved: ${tid})`, e instanceof Error ? e.stack : String(e));
+      this.logger.error(
+        `Failed to delete task ${taskId} (resolved: ${tid})`,
+        e instanceof Error ? e.stack : String(e),
+      );
       throw new ConflictException(e instanceof Error ? e.message : 'Failed to delete task');
     }
   }
 
-  async AddTaskAttachments(taskId: string, attachments: Express.Multer.File[]): Promise<string> {
+  async AddTaskAttachments(
+    taskId: string,
+    attachments: Express.Multer.File[],
+    nik?: string,
+  ): Promise<string> {
     const tid = (await this.resolveTaskId(taskId)) || this.normalizeGuid(taskId);
     if (!tid) {
       throw new NotFoundException(`Task ${taskId} not found`);
@@ -581,7 +757,7 @@ export class ProjectService {
     // pastikan task ada
     const task = await this.prismaService.dT_TASK.findUnique({
       where: { id: tid },
-      select: { id: true },
+      select: { id: true, name: true, id_dt_project: true, createdBy: true },
     });
 
     if (!task) {
@@ -613,6 +789,20 @@ export class ProjectService {
     await this.prismaService.dT_TASK_ATTACHMENT.createMany({
       data: uploadedAttachments,
     });
+
+    if (task.id_dt_project) {
+      await this.logActivity({
+        projectId: task.id_dt_project,
+        taskid: tid,
+        nik: nik || task.createdBy,
+        action: 'ATTACHMENT_UPLOADED',
+        details: {
+          taskName: task.name,
+          count: attachments.length,
+          filenames: attachments.map((f) => (f.originalname || 'file').slice(0, 50)),
+        },
+      });
+    }
 
     return `Uploaded ${uploadedAttachments.length} attachment(s) to task ${taskId}`;
   }
@@ -712,7 +902,7 @@ export class ProjectService {
 
     for (let attempt = 1; attempt <= MAX_RETRY; attempt++) {
       try {
-        return await this.prismaService.$transaction(async (tx) => {
+        const result = await this.prismaService.$transaction(async (tx) => {
           // 🔒 Lock project row to serialize task rank moves for this project
           await tx.$executeRaw`
             SELECT id FROM dbo.DT_PROJECT WITH (UPDLOCK, ROWLOCK)
@@ -740,8 +930,12 @@ export class ProjectService {
           }
 
           // 3) Normalisasi tetangga (harus di section tujuan)
-          const beforeResolved = (await this.resolveTaskId(body.beforeId ?? null, pid)) || this.normalizeGuid(body.beforeId ?? null);
-          const afterResolved = (await this.resolveTaskId(body.afterId ?? null, pid)) || this.normalizeGuid(body.afterId ?? null);
+          const beforeResolved =
+            (await this.resolveTaskId(body.beforeId ?? null, pid)) ||
+            this.normalizeGuid(body.beforeId ?? null);
+          const afterResolved =
+            (await this.resolveTaskId(body.afterId ?? null, pid)) ||
+            this.normalizeGuid(body.afterId ?? null);
           const beforeId = beforeResolved === tid ? null : beforeResolved;
           const afterId = afterResolved === tid ? null : afterResolved;
 
@@ -816,6 +1010,18 @@ export class ProjectService {
             },
           });
         });
+
+        this.projectGateway.broadcastToProject(pid, 'task:moved', {
+          taskId: tid,
+          id: tid,
+          shortId: result.shortId,
+          targetSectionId: result.id_dt_section,
+          rank: result.rank,
+          beforeId: body.beforeId ?? null,
+          afterId: body.afterId ?? null,
+        });
+
+        return result;
       } catch (e: any) {
         if (attempt < MAX_RETRY) {
           await new Promise((resolve) =>
@@ -841,6 +1047,7 @@ export class ProjectService {
   async syncProjectMembers(
     projectId: string,
     members: MemberRequest[],
+    senderNik?: string,
   ): Promise<{ nik: string; nama: string }[]> {
     const pid = (await this.resolveProjectId(projectId)) || projectId;
     // diff di luar tx supaya bisa dipakai kirim email setelah commit
@@ -976,6 +1183,20 @@ export class ProjectService {
             nik: { in: toDeleteNik },
           },
         });
+
+        for (const nik of toDeleteNik) {
+          const oldMember = existing.find((e) => e.nik === nik);
+          await tx.lOG_ACTIVITY.create({
+            data: {
+              projectId: pid,
+              nik: senderNik || nik,
+              action: 'MEMBER_REMOVED',
+              details: JSON.stringify({
+                memberName: oldMember?.user?.nama || nik,
+              }),
+            },
+          });
+        }
       }
 
       // 5) CREATE yang baru
@@ -987,6 +1208,43 @@ export class ProjectService {
             id_dt_project_role: m.roleId,
           })),
         });
+
+        for (const m of toCreate) {
+          const userRec = await tx.dT_USER.findUnique({
+            where: { nik: m.nik },
+            select: { nama: true },
+          });
+          await tx.lOG_ACTIVITY.create({
+            data: {
+              projectId: pid,
+              nik: m.nik,
+              action: 'MEMBER_JOINED',
+              details: JSON.stringify({
+                memberName: userRec?.nama || m.nik,
+                role: m.roleId,
+              }),
+            },
+          });
+        }
+
+        // 📝 Catat ke LOG_INVITATION_PROJECT
+        if (senderNik) {
+          try {
+            await tx.lOG_INVITATION_PROJECT.createMany({
+              data: toCreate.map((m) => ({
+                sender: senderNik,
+                to: m.nik,
+                projectId: pid,
+                status: 'JOINED',
+                asRole: m.roleId,
+              })),
+            });
+          } catch (logErr) {
+            this.logger.warn(
+              `Failed logging to LOG_INVITATION_PROJECT: ${(logErr as Error).message}`,
+            );
+          }
+        }
       }
 
       // 6) UPDATE role yang berubah
@@ -995,7 +1253,7 @@ export class ProjectService {
           toUpdate.map((m) =>
             tx.dT_MEMBER_PROJECT.updateMany({
               where: {
-                projectId,
+                projectId: pid,
                 nik: m.newData.nik,
               },
               data: {
@@ -1033,11 +1291,14 @@ export class ProjectService {
     }
 
     try {
-      const project = await this.prismaService.dT_PROJECT.findUnique({
-        where: { id: projectId },
-        select: { name: true },
+      const project = await this.prismaService.dT_PROJECT.findFirst({
+        where: {
+          OR: [{ id: pid }, { shortId: projectId }],
+        },
+        select: { name: true, shortId: true, id: true },
       });
       const projectName = (project?.name as string) ?? 'Project';
+      const effectiveProjectId = project?.shortId || project?.id || projectId;
 
       const nikToNotify = Array.from(
         new Set([
@@ -1060,11 +1321,17 @@ export class ProjectService {
       // 1) NEW MEMBERS → "diundang / bergabung"
       for (const m of toCreate) {
         const u = userMap.get(this.normalizeNik(m.nik));
-        if (!u?.email) continue;
+        if (!u?.email) {
+          this.logger.warn(`User ${m.nik} does not have an email in DT_USER. Skipping email.`);
+          continue;
+        }
 
+        this.logger.log(
+          `📧 Sending project joined email to ${u.email} for project "${projectName}"...`,
+        );
         await this.mailService.sendProjectJoinedEmail({
           to: u.email,
-          projectId,
+          projectId: effectiveProjectId,
           projectName,
           role: m.roleId as 'OWNER' | 'EDITOR' | 'READ',
         });
@@ -1075,9 +1342,10 @@ export class ProjectService {
         const u = userMap.get(this.normalizeNik(x.newData.nik));
         if (!u?.email) continue;
 
+        this.logger.log(`📧 Sending project role changed email to ${u.email}...`);
         await this.mailService.sendProjectRoleChangedEmail({
           to: u.email,
-          projectId,
+          projectId: effectiveProjectId,
           projectName,
           oldRole: x.oldRole,
           newRole: x.newData.roleId as 'OWNER' | 'EDITOR' | 'READ',
@@ -1089,14 +1357,18 @@ export class ProjectService {
         const u = userMap.get(this.normalizeNik(nik));
         if (!u?.email) continue;
 
+        this.logger.log(`📧 Sending project access revoked email to ${u.email}...`);
         await this.mailService.sendProjectAccessRevokedEmail({
           to: u.email,
-          projectId,
+          projectId: effectiveProjectId,
           projectName,
         });
       }
     } catch (e) {
-      console.warn('Failed sending project member emails:', e);
+      this.logger.error(
+        'Failed sending project member emails:',
+        e instanceof Error ? e.stack : String(e),
+      );
     }
 
     return finalMembers;
@@ -1137,7 +1409,7 @@ export class ProjectService {
     });
     const newRank = this.rankAfter(max?.rank ?? null);
 
-    return this.prismaService.dT_SUB_TASK.create({
+    const created = await this.prismaService.dT_SUB_TASK.create({
       data: {
         name: trimmedName,
         dueDate: data.dueDate ?? null,
@@ -1146,15 +1418,43 @@ export class ProjectService {
         rank: newRank,
       },
     });
+
+    if (task.id_dt_project) {
+      this.projectGateway.broadcastToProject(task.id_dt_project, 'subtask:created', {
+        taskId: tid,
+        subtaskId: created.id,
+        name: created.name,
+        rank: created.rank,
+        dueDate: created.dueDate,
+        status: created.status,
+        createdAt: created.createdAt,
+        createdBy: created.createdBy,
+      });
+
+      await this.logActivity({
+        projectId: task.id_dt_project,
+        taskid: tid,
+        nik: creatorNik,
+        action: 'SUBTASK_CREATED',
+        details: { subTaskName: created.name, parentTaskName: task.name },
+      });
+    }
+
+    return created;
   }
 
-  async updateSubTask(subtaskId: string, data: UpdateSubTaskRequest): Promise<DT_SUB_TASK> {
+  async updateSubTask(
+    subtaskId: string,
+    data: UpdateSubTaskRequest,
+    nik?: string,
+  ): Promise<DT_SUB_TASK> {
     const subtask = await this.prismaService.dT_SUB_TASK.findUnique({
       where: { id: subtaskId },
+      include: { task: { select: { id_dt_project: true } } },
     });
     if (!subtask) throw new NotFoundException(`Subtask ${subtaskId} not found`);
 
-    return this.prismaService.dT_SUB_TASK.update({
+    const updated = await this.prismaService.dT_SUB_TASK.update({
       where: { id: subtaskId },
       data: {
         ...(data.name !== undefined && { name: data.name }),
@@ -1166,6 +1466,29 @@ export class ProjectService {
         ...(data.customFields !== undefined && { customFields: data.customFields }),
       },
     });
+
+    if (subtask.task?.id_dt_project) {
+      this.projectGateway.broadcastToProject(subtask.task.id_dt_project, 'subtask:updated', {
+        taskId: subtask.id_dt_task,
+        subtaskId: updated.id,
+        name: updated.name,
+        status: updated.status,
+        dueDate: updated.dueDate,
+        customFields: updated.customFields,
+      });
+
+      if (data.status !== undefined && data.status !== subtask.status) {
+        await this.logActivity({
+          projectId: subtask.task.id_dt_project,
+          taskid: subtask.id_dt_task,
+          nik: nik || subtask.createdBy || '00000000',
+          action: data.status ? 'SUBTASK_COMPLETED' : 'SUBTASK_UNCOMPLETED',
+          details: { subTaskName: updated.name },
+        });
+      }
+    }
+
+    return updated;
   }
 
   async syncSubTaskAssignees(
@@ -1239,8 +1562,14 @@ export class ProjectService {
         });
       }
 
-      return { toInsert: toInsert.length, toDelete: toDelete.length };
+      return { toInsert: toInsert.length, toDelete: toDelete.length, insertedNiks: toInsert };
     });
+
+    if (result.insertedNiks && result.insertedNiks.length > 0) {
+      this.sendSubTaskAssignedEmailsAsync(subTaskId, result.insertedNiks).catch((err) =>
+        this.logger.warn(`Failed sending subtask assigned emails: ${err}`),
+      );
+    }
 
     if (result.toInsert === 0 && result.toDelete === 0) {
       return 'Tidak ada perubahan assignee sub task.';
@@ -1252,10 +1581,19 @@ export class ProjectService {
   async deleteSubTask(subtaskId: string): Promise<{ message: string }> {
     const exist = await this.prismaService.dT_SUB_TASK.findUnique({
       where: { id: subtaskId },
+      include: { task: { select: { id_dt_project: true } } },
     });
     if (!exist) throw new NotFoundException(`Subtask ${subtaskId} not found`);
 
     await this.prismaService.dT_SUB_TASK.delete({ where: { id: subtaskId } });
+
+    if (exist.task?.id_dt_project) {
+      this.projectGateway.broadcastToProject(exist.task.id_dt_project, 'subtask:deleted', {
+        taskId: exist.id_dt_task,
+        subtaskId,
+      });
+    }
+
     return { message: 'Subtask deleted successfully' };
   }
 
@@ -1269,7 +1607,7 @@ export class ProjectService {
       select: { id: true },
     });
 
-    let base = 8000000000000000n;
+    const base = 8000000000000000n;
     const step = 100000000000000n;
 
     for (let i = 0; i < subtasks.length; i++) {
@@ -1290,7 +1628,12 @@ export class ProjectService {
 
     const subtask = await this.prismaService.dT_SUB_TASK.findUnique({
       where: { id: sid },
-      select: { id: true, id_dt_task: true, rank: true },
+      select: {
+        id: true,
+        id_dt_task: true,
+        rank: true,
+        task: { select: { id_dt_project: true } },
+      },
     });
     if (!subtask) throw new NotFoundException(`Subtask ${sid} not found`);
     const tid = subtask.id_dt_task;
@@ -1300,8 +1643,7 @@ export class ProjectService {
     let targetTid = tid;
     if (body.targetTaskId) {
       const resolvedTarget =
-        (await this.resolveTaskId(body.targetTaskId)) ||
-        this.normalizeGuid(body.targetTaskId);
+        (await this.resolveTaskId(body.targetTaskId)) || this.normalizeGuid(body.targetTaskId);
       if (!resolvedTarget) {
         throw new NotFoundException(`Target task ${body.targetTaskId} not found`);
       }
@@ -1333,18 +1675,27 @@ export class ProjectService {
     const MAX_RETRY = 3;
     const computeNewRank = async (): Promise<string> => {
       // FE: beforeId = neighbor ATAS (rank lebih kecil), afterId = neighbor BAWAH (rank lebih besar)
-      let [prevItem, nextItem] = await Promise.all([fetchNeighbor(beforeId), fetchNeighbor(afterId)]);
+      let [prevItem, nextItem] = await Promise.all([
+        fetchNeighbor(beforeId),
+        fetchNeighbor(afterId),
+      ]);
 
       // 1) Diapit dua tetangga
       if (prevItem && nextItem) {
         if (prevItem.rank && nextItem.rank && prevItem.rank >= nextItem.rank) {
           await this.rebalanceTaskSubTasks(targetTid);
-          [prevItem, nextItem] = await Promise.all([fetchNeighbor(beforeId), fetchNeighbor(afterId)]);
+          [prevItem, nextItem] = await Promise.all([
+            fetchNeighbor(beforeId),
+            fetchNeighbor(afterId),
+          ]);
         }
         let rank = this.rankBetween(prevItem?.rank ?? null, nextItem?.rank ?? null);
         if (rank === prevItem?.rank || rank === nextItem?.rank) {
           await this.rebalanceTaskSubTasks(targetTid);
-          [prevItem, nextItem] = await Promise.all([fetchNeighbor(beforeId), fetchNeighbor(afterId)]);
+          [prevItem, nextItem] = await Promise.all([
+            fetchNeighbor(beforeId),
+            fetchNeighbor(afterId),
+          ]);
           rank = this.rankBetween(prevItem?.rank ?? null, nextItem?.rank ?? null);
         }
         return rank;
@@ -1391,12 +1742,26 @@ export class ProjectService {
             select: { nik: true },
           });
           for (const sa of subAssignees) {
-            await this.prismaService.dT_ASSIGNEE_TASK.upsert({
-              where: { taskId_nik: { taskId: targetTid, nik: sa.nik } },
-              create: { taskId: targetTid, nik: sa.nik },
-              update: {},
-            }).catch(() => null);
+            await this.prismaService.dT_ASSIGNEE_TASK
+              .upsert({
+                where: { taskId_nik: { taskId: targetTid, nik: sa.nik } },
+                create: { taskId: targetTid, nik: sa.nik },
+                update: {},
+              })
+              .catch(() => null);
           }
+        }
+
+        const pid = subtask.task?.id_dt_project;
+        if (pid) {
+          this.projectGateway.broadcastToProject(pid, 'subtask:moved', {
+            taskId: tid,
+            targetTaskId: targetTid,
+            subtaskId: sid,
+            beforeId: body.beforeId ?? null,
+            afterId: body.afterId ?? null,
+            rank: updated.rank,
+          });
         }
 
         return updated;
@@ -1453,9 +1818,7 @@ export class ProjectService {
     if ('targetSectionId' in body) {
       const raw = body.targetSectionId;
       destSectionId =
-        raw === 'unlocated' || raw === 'null' || raw == null
-          ? null
-          : this.normalizeGuid(raw);
+        raw === 'unlocated' || raw === 'null' || raw == null ? null : this.normalizeGuid(raw);
     } else {
       destSectionId = subtask.task.id_dt_section;
     }
@@ -1533,8 +1896,7 @@ export class ProjectService {
     const pid = (await this.resolveProjectId(projectId)) || this.normalizeGuid(projectId);
     const tid = (await this.resolveTaskId(taskId, pid)) || this.normalizeGuid(taskId);
     const targetTid =
-      (await this.resolveTaskId(body.targetTaskId, pid)) ||
-      this.normalizeGuid(body.targetTaskId);
+      (await this.resolveTaskId(body.targetTaskId, pid)) || this.normalizeGuid(body.targetTaskId);
     if (!pid) throw new BadRequestException('Invalid projectId');
     if (!tid) throw new BadRequestException('Invalid taskId');
     if (!targetTid) throw new BadRequestException('Invalid targetTaskId');
@@ -1558,7 +1920,20 @@ export class ProjectService {
         select: { id: true },
       }),
     ]);
-    if (!task) throw new NotFoundException(`Task ${tid} not found in project ${pid}`);
+    if (!task) {
+      const existingSub = await this.prismaService.dT_SUB_TASK.findUnique({
+        where: { id: tid },
+        include: { task: true },
+      });
+      if (existingSub && existingSub.task.id_dt_project === pid) {
+        return this.moveSubTask(tid, {
+          beforeId: body.beforeId,
+          afterId: body.afterId,
+          targetTaskId: targetTid,
+        }) as any;
+      }
+      throw new NotFoundException(`Task ${tid} not found in project ${pid}`);
+    }
     if (!target) throw new NotFoundException(`Target task ${targetTid} not found`);
 
     const beforeIdRaw = this.normalizeGuid(body.beforeId ?? null);
@@ -1575,7 +1950,7 @@ export class ProjectService {
         return !n || n.id_dt_task !== targetTid ? null : n;
       };
 
-      let [prevItem, nextItem] = await Promise.all([
+      const [prevItem, nextItem] = await Promise.all([
         fetchNeighbor(beforeIdRaw),
         fetchNeighbor(afterIdRaw),
       ]);
@@ -1888,25 +2263,17 @@ export class ProjectService {
     } as const;
   }
 
-  async findTasksAndSections(
-    projectId: string,
-    viewId?: string,
-  ): Promise<TaskSectionResponse> {
-    const pid = (await this.resolveProjectId(projectId)) || this.normalizeGuid(projectId) || projectId;
-    const vid = viewId ? ((await this.resolveViewId(viewId, pid)) || this.normalizeGuid(viewId)) : null;
+  async findTasksAndSections(projectId: string, viewId?: string): Promise<TaskSectionResponse> {
+    const pid =
+      (await this.resolveProjectId(projectId)) || this.normalizeGuid(projectId) || projectId;
+    void viewId;
 
     const unlocatedWhere: any = { id_dt_project: pid, id_dt_section: null };
-    if (vid) {
-      unlocatedWhere.id_dt_view = vid;
-    }
 
     const taskQuery: any = {
       select: this.taskSelect,
       orderBy: [{ rank: 'asc' }],
     };
-    if (vid) {
-      taskQuery.where = { id_dt_view: vid };
-    }
 
     const [unlocatedTasks, sections] = await Promise.all([
       this.prismaService.dT_TASK.findMany({
@@ -1919,6 +2286,7 @@ export class ProjectService {
         select: {
           id: true,
           name: true,
+          category: true,
           rank: true,
           tasks: taskQuery,
         },
@@ -1930,12 +2298,18 @@ export class ProjectService {
       sections: sections.map((s) => ({
         id: s.id,
         name: s.name,
+        category: s.category || 'active',
         tasks: (s.tasks ?? []).map((t: any) => this.mapTask(t)),
       })),
     };
   }
 
-  async createSection(projectId: string, name: string): Promise<DT_SECTION> {
+  async createSection(
+    projectId: string,
+    name: string,
+    category: string = 'active',
+    nik?: string,
+  ): Promise<DT_SECTION> {
     const pid = (await this.resolveProjectId(projectId)) || projectId;
     const last = await this.prismaService.dT_SECTION.findFirst({
       where: { id_dt_project: pid },
@@ -1944,11 +2318,13 @@ export class ProjectService {
     });
     let rank = last ? this.rankAfter(last.rank) : '8888888888888888';
 
+    let created: DT_SECTION | null = null;
     for (let i = 0; i < 3; i += 1) {
       try {
-        return await this.prismaService.dT_SECTION.create({
-          data: { name, id_dt_project: pid, rank },
+        created = await this.prismaService.dT_SECTION.create({
+          data: { name, id_dt_project: pid, rank, category },
         });
+        break;
       } catch (e) {
         if (this.isUniqueConstraintError(e) && i < 2) {
           const next = await this.prismaService.dT_SECTION.findFirst({
@@ -1964,29 +2340,74 @@ export class ProjectService {
       }
     }
 
-    return this.prismaService.dT_SECTION.create({
-      data: { name, id_dt_project: pid, rank },
+    if (!created) {
+      created = await this.prismaService.dT_SECTION.create({
+        data: { name, id_dt_project: pid, rank, category },
+      });
+    }
+
+    this.projectGateway.broadcastToProject(pid, 'section:created', {
+      sectionId: created.id,
+      name: created.name,
+      rank: created.rank,
+      category: created.category,
     });
+
+    if (created && nik) {
+      await this.logActivity({
+        projectId: pid,
+        nik,
+        action: 'SECTION_CREATED',
+        details: { sectionName: created.name },
+      });
+    }
+
+    return created;
   }
 
-  async updateSection(sectionId: string, name: string): Promise<DT_SECTION> {
-    return await this.prismaService.dT_SECTION.update({
+  async updateSection(
+    sectionId: string,
+    payload: { name?: string; category?: string } | string,
+  ): Promise<DT_SECTION> {
+    const data: any = {};
+    if (typeof payload === 'string') {
+      data.name = payload;
+    } else {
+      if (payload.name !== undefined) data.name = payload.name;
+      if (payload.category !== undefined) data.category = payload.category;
+    }
+    const updated = await this.prismaService.dT_SECTION.update({
       where: { id: sectionId },
-      data: { name: name },
+      data,
     });
+
+    if (updated.id_dt_project) {
+      this.projectGateway.broadcastToProject(updated.id_dt_project, 'section:updated', {
+        sectionId: updated.id,
+        name: updated.name,
+        category: updated.category,
+      });
+    }
+
+    return updated;
   }
 
-  async removeSection({ projectId, sectionId, includeTask }: RemoveSectionArgs): Promise<string> {
+  async removeSection(
+    { projectId, sectionId, includeTask }: RemoveSectionArgs,
+    nik?: string,
+  ): Promise<string> {
     const pid = (await this.resolveProjectId(projectId)) || projectId;
+    let deletedSecName: string | null = null;
     await this.prismaService.$transaction(async (tx) => {
       const sec = await tx.dT_SECTION.findFirst({
         where: { id: sectionId, id_dt_project: pid },
-        select: { id: true },
+        select: { id: true, name: true },
       });
 
       if (!sec) {
         throw new Error('Section tidak ditemukan untuk project tersebut');
       }
+      deletedSecName = sec.name;
 
       if (includeTask) {
         await tx.dT_TASK.deleteMany({
@@ -2002,6 +2423,20 @@ export class ProjectService {
         where: { id: sectionId },
       });
     });
+
+    this.projectGateway.broadcastToProject(pid, 'section:deleted', {
+      sectionId,
+      includeTask,
+    });
+
+    if (nik && deletedSecName) {
+      await this.logActivity({
+        projectId: pid,
+        nik,
+        action: 'SECTION_DELETED',
+        details: { sectionName: deletedSecName },
+      });
+    }
 
     return 'Delete Section Successfully';
   }
@@ -2025,7 +2460,7 @@ export class ProjectService {
 
     for (let attempt = 1; attempt <= MAX_RETRY; attempt++) {
       try {
-        return await this.prismaService.$transaction(async (tx) => {
+        const result = await this.prismaService.$transaction(async (tx) => {
           // 🔒 Lock project row to serialize section moves for this project
           await tx.$executeRaw`
             SELECT id FROM dbo.DT_PROJECT WITH (UPDLOCK, ROWLOCK)
@@ -2067,6 +2502,15 @@ export class ProjectService {
             data: { rank: newRank },
           });
         });
+
+        this.projectGateway.broadcastToProject(pid, 'section:moved', {
+          sectionId: sid,
+          rank: result.rank,
+          beforeId: opts.beforeId ?? null,
+          afterId: opts.afterId ?? null,
+        });
+
+        return result;
       } catch (e: any) {
         if (attempt < MAX_RETRY) {
           await new Promise((resolve) =>
@@ -2177,7 +2621,8 @@ export class ProjectService {
     const bytes = crypto.randomBytes(length);
     let result = '';
     for (let i = 0; i < length; i++) {
-      result += ProjectService.SHORT_ID_ALPHABET[bytes[i] % ProjectService.SHORT_ID_ALPHABET.length];
+      result +=
+        ProjectService.SHORT_ID_ALPHABET[bytes[i] % ProjectService.SHORT_ID_ALPHABET.length];
     }
     return result;
   }
@@ -2194,7 +2639,10 @@ export class ProjectService {
     return project?.id ? project.id.toLowerCase() : null;
   }
 
-  async resolveTaskId(idOrShort?: string | null, projectId?: string | null): Promise<string | null> {
+  async resolveTaskId(
+    idOrShort?: string | null,
+    projectId?: string | null,
+  ): Promise<string | null> {
     if (!idOrShort) return null;
     const raw = idOrShort.trim();
     if (ProjectService.UUID_REGEX.test(raw)) return raw.toLowerCase();
@@ -2210,7 +2658,10 @@ export class ProjectService {
     return task?.id ? task.id.toLowerCase() : null;
   }
 
-  async resolveViewId(idOrShort?: string | null, projectId?: string | null): Promise<string | null> {
+  async resolveViewId(
+    idOrShort?: string | null,
+    projectId?: string | null,
+  ): Promise<string | null> {
     if (!idOrShort) return null;
     const raw = idOrShort.trim();
     if (ProjectService.UUID_REGEX.test(raw)) return raw.toLowerCase();
@@ -2225,7 +2676,6 @@ export class ProjectService {
     });
     return view?.id ? view.id.toLowerCase() : null;
   }
-
 
   private stripSectionPrefix(id?: string | null): string | null {
     if (!id) return null;
@@ -2296,6 +2746,15 @@ export class ProjectService {
         ...(settings !== undefined ? { settings } : {}),
       },
     });
+
+    this.projectGateway.broadcastToProject(pid, 'view:created', {
+      view: {
+        ...created,
+        id: created.shortId || created.id,
+        projectId,
+      },
+    });
+
     return {
       ...created,
       id: created.shortId || created.id,
@@ -2313,7 +2772,7 @@ export class ProjectService {
       select: { id: true },
     });
 
-    let base = 8000000000000000n;
+    const base = 8000000000000000n;
     const step = 100000000000000n;
 
     for (let i = 0; i < views.length; i++) {
@@ -2335,8 +2794,10 @@ export class ProjectService {
     if (!pid) throw new BadRequestException('Invalid projectId');
     if (!vid) throw new BadRequestException('Invalid viewId');
 
-    const beforeIdRaw = (await this.resolveViewId(opts.beforeId, pid)) || this.normalizeGuid(opts.beforeId ?? null);
-    const afterIdRaw = (await this.resolveViewId(opts.afterId, pid)) || this.normalizeGuid(opts.afterId ?? null);
+    const beforeIdRaw =
+      (await this.resolveViewId(opts.beforeId, pid)) || this.normalizeGuid(opts.beforeId ?? null);
+    const afterIdRaw =
+      (await this.resolveViewId(opts.afterId, pid)) || this.normalizeGuid(opts.afterId ?? null);
     const beforeId = beforeIdRaw === vid ? null : beforeIdRaw;
     const afterId = afterIdRaw === vid ? null : afterIdRaw;
 
@@ -2433,10 +2894,19 @@ export class ProjectService {
             return tx.dT_VIEWS.findUniqueOrThrow({ where: { id: vid } });
           }
 
-          return await tx.dT_VIEWS.update({
+          const updated = await tx.dT_VIEWS.update({
             where: { id: vid },
             data: { rank: newRank },
           });
+
+          this.projectGateway.broadcastToProject(pid, 'view:moved', {
+            viewId: updated.shortId || updated.id,
+            rank: updated.rank,
+            beforeId: opts.beforeId ?? null,
+            afterId: opts.afterId ?? null,
+          });
+
+          return updated;
         });
       } catch (e: any) {
         if (attempt < MAX_RETRY) {
@@ -2480,6 +2950,15 @@ export class ProjectService {
         ...(viewType !== undefined ? { type: viewType } : {}),
         ...(data.settings !== undefined ? { settings: data.settings } : {}),
       },
+    });
+
+    this.projectGateway.broadcastToProject(pid, 'view:updated', {
+      viewId: updated.shortId || updated.id,
+      id: updated.id,
+      shortId: updated.shortId,
+      name: updated.name,
+      type: updated.type,
+      settings: updated.settings,
     });
 
     return {
@@ -2529,6 +3008,12 @@ export class ProjectService {
       });
     });
 
+    this.projectGateway.broadcastToProject(pid, 'view:deleted', {
+      viewId: existing.shortId || existing.id,
+      resolvedViewId: vid,
+      fallbackViewId: fallbackView?.shortId || fallbackView?.id,
+    });
+
     return {
       message: 'View deleted successfully',
       fallbackViewId: fallbackView?.shortId || fallbackView?.id,
@@ -2564,7 +3049,19 @@ export class ProjectService {
             user: { select: { nama: true, photo: true } },
           },
         },
-        activities: true,
+        activities: {
+          orderBy: { createdAt: 'desc' },
+          take: 50,
+          include: {
+            user: {
+              select: {
+                nik: true,
+                nama: true,
+                photo: true,
+              },
+            },
+          },
+        },
       },
     });
     if (!project) throw new NotFoundException(`Project with id ${projectId} not found`);
@@ -2595,8 +3092,132 @@ export class ProjectService {
       createdAt: project.createdAt,
       isArchive: project.isArchive,
       members: formattedMembers,
-      activities: project.activities,
+      activities: (project.activities || []).map((act) => ({
+        id: act.id,
+        projectId: projectSlug,
+        taskid: act.taskid,
+        nik: act.nik.trim(),
+        action: act.action,
+        details: act.details,
+        createdAt: act.createdAt,
+        user: act.user
+          ? {
+              nik: act.user.nik.trim(),
+              nama: act.user.nama,
+              photo: act.user.photo,
+            }
+          : null,
+      })),
     };
+  }
+
+  // =========================================================
+  // 🔹 ACTIVITY LOGGING
+  // =========================================================
+
+  async logActivity(
+    params: {
+      projectId: string;
+      taskid?: string | null;
+      nik: string;
+      action: string;
+      details?: Record<string, any> | string;
+      createdAt?: Date;
+    },
+    tx?: Prisma.TransactionClient,
+  ): Promise<ActivityResponse | null> {
+    try {
+      const pid = (await this.resolveProjectId(params.projectId)) || params.projectId;
+      const detailsStr =
+        typeof params.details === 'object'
+          ? JSON.stringify(params.details)
+          : (params.details ?? null);
+      const client = tx || this.prismaService;
+
+      const created = await client.lOG_ACTIVITY.create({
+        data: {
+          projectId: pid,
+          taskid: params.taskid ?? null,
+          nik: params.nik,
+          action: params.action,
+          details: detailsStr,
+          ...(params.createdAt ? { createdAt: params.createdAt } : {}),
+        },
+        include: {
+          user: {
+            select: {
+              nik: true,
+              nama: true,
+              photo: true,
+            },
+          },
+        },
+      });
+
+      const activityRes: ActivityResponse = {
+        id: created.id,
+        projectId: pid,
+        taskid: created.taskid,
+        nik: created.nik.trim(),
+        action: created.action,
+        details: created.details,
+        createdAt: created.createdAt,
+        user: created.user
+          ? {
+              nik: created.user.nik.trim(),
+              nama: created.user.nama,
+              photo: created.user.photo,
+            }
+          : null,
+      };
+
+      // Broadcast real-time activity to project room
+      void this.projectGateway.broadcastToProject(pid, 'activity:created', activityRes);
+
+      return activityRes;
+    } catch (err: unknown) {
+      this.logger.warn(`Failed to log activity: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
+  }
+
+  async getProjectActivities(projectId: string, limit: number = 50): Promise<ActivityResponse[]> {
+    const pid = (await this.resolveProjectId(projectId)) || projectId;
+    const activities = await this.prismaService.lOG_ACTIVITY.findMany({
+      where: {
+        projectId: pid,
+      },
+      orderBy: {
+        createdAt: 'desc',
+      },
+      take: Math.min(Math.max(Number(limit) || 50, 1), 100),
+      include: {
+        user: {
+          select: {
+            nik: true,
+            nama: true,
+            photo: true,
+          },
+        },
+      },
+    });
+
+    return activities.map((act) => ({
+      id: act.id,
+      projectId: pid,
+      taskid: act.taskid,
+      nik: act.nik.trim(),
+      action: act.action,
+      details: act.details,
+      createdAt: act.createdAt,
+      user: act.user
+        ? {
+            nik: act.user.nik.trim(),
+            nama: act.user.nama,
+            photo: act.user.photo,
+          }
+        : null,
+    }));
   }
 
   private async ensureSectionExists(projectId: string, sectionId: string): Promise<DT_SECTION> {
@@ -2661,5 +3282,164 @@ export class ProjectService {
     await tx.dT_MEMBER_PROJECT.createMany({
       data: rows,
     });
+  }
+
+  /** Trigger manual untuk daily digest / reminder email */
+  async triggerDailyDigest() {
+    return this.cronjobService.sendDailyTaskRemindersAndDigest();
+  }
+
+  private checkNotificationPref(prefsJson: string | null | undefined, key: string): boolean {
+    if (!prefsJson) return true; // Default ON
+    try {
+      const parsed = JSON.parse(prefsJson);
+      return parsed[key] !== false;
+    } catch {
+      return true;
+    }
+  }
+
+  private async sendTaskAssignedEmailsAsync(
+    targetNiks: string[],
+    projectId: string,
+    taskId: string,
+    taskName: string,
+    assignerNik: string,
+    dueDate?: Date | null,
+    isSubtask = false,
+  ): Promise<void> {
+    try {
+      const [users, assignerUser, project] = await Promise.all([
+        this.prismaService.dT_USER.findMany({
+          where: { nik: { in: targetNiks } },
+          select: { nik: true, nama: true, email: true, notificationPrefs: true },
+        }),
+        this.prismaService.dT_USER.findUnique({
+          where: { nik: assignerNik },
+          select: { nama: true },
+        }),
+        this.prismaService.dT_PROJECT.findUnique({
+          where: { id: projectId },
+          select: { name: true, shortId: true },
+        }),
+      ]);
+
+      const projectName = project?.name || 'Project';
+      const assignerName = assignerUser?.nama || assignerNik;
+      const effectiveProjectId = project?.shortId || projectId;
+
+      for (const u of users) {
+        if (!u.email) continue;
+        if (!this.checkNotificationPref(u.notificationPrefs, 'emailTaskAssigned')) {
+          this.logger.debug(`User ${u.nik} disabled emailTaskAssigned preference. Skipping email.`);
+          continue;
+        }
+
+        await this.mailService.sendTaskAssignedEmail({
+          to: u.email,
+          taskId,
+          taskName,
+          projectId: effectiveProjectId,
+          projectName,
+          assignedByName: assignerName,
+          dueDate,
+          isSubtask,
+        });
+      }
+    } catch (err) {
+      this.logger.warn(`Failed sending task assigned emails: ${err}`);
+    }
+  }
+
+  private async sendSubTaskAssignedEmailsAsync(
+    subTaskId: string,
+    insertedNiks: string[],
+  ): Promise<void> {
+    try {
+      const subtask = await this.prismaService.dT_SUB_TASK.findUnique({
+        where: { id: subTaskId },
+        include: {
+          task: {
+            select: {
+              id: true,
+              shortId: true,
+              name: true,
+              id_dt_project: true,
+              project: { select: { id: true, shortId: true, name: true } },
+            },
+          },
+        },
+      });
+
+      if (!subtask?.task?.id_dt_project) return;
+
+      await this.sendTaskAssignedEmailsAsync(
+        insertedNiks,
+        subtask.task.id_dt_project,
+        subtask.task.shortId || subtask.task.id,
+        subtask.name,
+        subtask.createdBy || 'Lead',
+        subtask.dueDate,
+        true,
+      );
+    } catch (err) {
+      this.logger.warn(`Failed sending subtask assigned emails: ${err}`);
+    }
+  }
+
+  private async checkAndSendProjectCompletedEmailAsync(projectId: string): Promise<void> {
+    try {
+      const remainingIncomplete = await this.prismaService.dT_TASK.count({
+        where: {
+          id_dt_project: projectId,
+          status: false,
+        },
+      });
+
+      if (remainingIncomplete === 0) {
+        const totalTasks = await this.prismaService.dT_TASK.count({
+          where: { id_dt_project: projectId },
+        });
+
+        if (totalTasks > 0) {
+          const [project, members] = await Promise.all([
+            this.prismaService.dT_PROJECT.findUnique({
+              where: { id: projectId },
+              include: { user: { select: { email: true, notificationPrefs: true } } },
+            }),
+            this.prismaService.dT_MEMBER_PROJECT.findMany({
+              where: { projectId },
+              include: { user: { select: { email: true, notificationPrefs: true } } },
+            }),
+          ]);
+
+          if (project) {
+            const candidateUsers = [project.user, ...members.map((m) => m.user)].filter(Boolean);
+            const allEmails = Array.from(
+              new Set(
+                candidateUsers
+                  .filter(
+                    (u) =>
+                      u?.email &&
+                      this.checkNotificationPref(u.notificationPrefs, 'emailProjectCompleted'),
+                  )
+                  .map((u) => u!.email!),
+              ),
+            );
+
+            if (allEmails.length > 0) {
+              await this.mailService.sendProjectCompletedEmail({
+                to: allEmails,
+                projectId: project.shortId || project.id,
+                projectName: project.name,
+                totalTasks,
+              });
+            }
+          }
+        }
+      }
+    } catch (err) {
+      this.logger.warn(`Failed checking project completion email: ${err}`);
+    }
   }
 }

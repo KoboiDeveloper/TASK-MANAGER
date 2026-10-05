@@ -65,7 +65,7 @@ export class CreateProjectRequest {
 
   @IsOptional()
   @IsArray()
-  sections?: Array<{ name: string; rank?: string }>;
+  sections?: Array<{ name: string; rank?: string; category?: string }>;
 }
 
 export class UpdateProjectRequest {

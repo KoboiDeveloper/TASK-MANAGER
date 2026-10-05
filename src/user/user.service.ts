@@ -21,6 +21,12 @@ import { generateColorFromString } from '../utils/color';
 interface IuserService {
   create(data: RegisterRequest, file?: Express.Multer.File): Promise<RegisterResponse>;
   updateUser(nik: string, data: RequestUpdateUser, file?: Express.Multer.File): Promise<void>;
+  updatePhoto(
+    nik: string,
+    photo?: string,
+    color?: string,
+    file?: Express.Multer.File,
+  ): Promise<{ photo: string }>;
   findAll(): Promise<ResponseListUsersDto[]>;
   findAllPaginated(
     limit: number,
@@ -32,7 +38,11 @@ interface IuserService {
   resetPassword(nik: string): Promise<void>;
   deleteUser(nik: string): Promise<void>;
   findOne(nik: string): Promise<DT_USER>;
-  UsrHRIS(search?: string, limit?: number, offset?: number): Promise<{ data: EmpHRIS[]; hasMore: boolean }>;
+  UsrHRIS(
+    search?: string,
+    limit?: number,
+    offset?: number,
+  ): Promise<{ data: EmpHRIS[]; hasMore: boolean }>;
 }
 
 @Injectable()
@@ -56,6 +66,7 @@ export class UserService implements IuserService {
         handleWeb: true,
         photo: true,
         departement: true,
+        notificationPrefs: true,
       },
     });
 
@@ -98,6 +109,7 @@ export class UserService implements IuserService {
           handleWeb: true,
           photo: true,
           departement: true,
+          notificationPrefs: true,
         },
       }),
     ]);
@@ -125,7 +137,11 @@ export class UserService implements IuserService {
     });
   }
 
-  async UsrHRIS(search?: string, limit = 10, offset = 0): Promise<{ data: EmpHRIS[]; hasMore: boolean }> {
+  async UsrHRIS(
+    search?: string,
+    limit = 10,
+    offset = 0,
+  ): Promise<{ data: EmpHRIS[]; hasMore: boolean }> {
     const keyword = search ? `%${search}%` : `%`;
 
     const fetchLimit = limit + 1; // fetch 1 extra to detect hasMore
@@ -178,22 +194,8 @@ export class UserService implements IuserService {
     const getRole = await this.roleService.getOrSave(data.roleId);
     const hashedPassword = encodePassword(data.password);
 
-    // Tentukan nilai photo: jika ada file upload -> simpan URL Dropbox, jika ada hex warna -> simpan hex, jika tidak ada -> generate hex dari nama
-    let photoValue: string;
-    if (file) {
-      assertImageFile(file);
-      const pathname = safeUserPhotoPath(getOriginalName(file), data.nik);
-      const uploaded = await this.storageService.uploadFile(
-        pathname,
-        file.buffer,
-        file.mimetype || 'application/octet-stream',
-      );
-      photoValue = uploaded.url;
-    } else if (data.photo && data.photo.trim()) {
-      photoValue = data.photo.trim();
-    } else if (data.color && data.color.trim()) {
-      photoValue = data.color.trim();
-    } else {
+    let photoValue = await this.processPhotoValue(data.nik, file, data.photo, data.color);
+    if (!photoValue) {
       photoValue = generateColorFromString(data.nama);
     }
 
@@ -249,21 +251,16 @@ export class UserService implements IuserService {
 
     const getRole = await this.roleService.getOrSave(data.roleId);
 
-    let photoUpdate: string | undefined;
-    if (file) {
-      assertImageFile(file);
-      const pathname = safeUserPhotoPath(getOriginalName(file), nik);
-      const uploaded = await this.storageService.uploadFile(
-        pathname,
-        file.buffer,
-        file.mimetype || 'application/octet-stream',
-      );
-      photoUpdate = uploaded.url;
-    } else if (data.photo && data.photo.trim()) {
-      photoUpdate = data.photo.trim();
-    } else if (data.color && data.color.trim()) {
-      photoUpdate = data.color.trim();
+    if (existingUser.roleId !== String(ERole.SUPER) && data.roleId === ERole.SUPER) {
+      data.roleId = existingUser.roleId as ERole;
     }
+
+    const photoUpdate: string | undefined = await this.processPhotoValue(
+      nik,
+      file,
+      data.photo,
+      data.color,
+    );
 
     const deptUpdate = data.departement !== undefined ? data.departement : data.departemen;
 
@@ -280,9 +277,75 @@ export class UserService implements IuserService {
           handleWeb: data.handleWeb,
           ...(photoUpdate !== undefined ? { photo: photoUpdate } : {}),
           ...(deptUpdate !== undefined ? { departement: deptUpdate } : {}),
+          ...(data.notificationPrefs !== undefined
+            ? { notificationPrefs: data.notificationPrefs }
+            : {}),
         },
       });
     });
+  }
+
+  private async processPhotoValue(
+    nik: string,
+    file?: Express.Multer.File,
+    photo?: string,
+    color?: string,
+  ): Promise<string | undefined> {
+    if (file) {
+      assertImageFile(file);
+      const pathname = safeUserPhotoPath(getOriginalName(file), nik);
+      const uploaded = await this.storageService.uploadFile(
+        pathname,
+        file.buffer,
+        file.mimetype || 'application/octet-stream',
+      );
+      return uploaded.url;
+    }
+
+    if (photo && photo.trim()) {
+      const trimmedPhoto = photo.trim();
+      // Check if photo is base64 DataURL (e.g. data:image/png;base64,...)
+      if (trimmedPhoto.startsWith('data:image/')) {
+        const matches = trimmedPhoto.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
+        if (matches && matches.length === 3) {
+          const mimetype = matches[1];
+          const buffer = Buffer.from(matches[2], 'base64');
+          const ext = mimetype.split('/')[1]?.split('+')[0] || 'png';
+          const pathname = safeUserPhotoPath(`avatar.${ext}`, nik);
+          const uploaded = await this.storageService.uploadFile(pathname, buffer, mimetype);
+          return uploaded.url;
+        }
+      }
+      return trimmedPhoto;
+    }
+
+    if (color && color.trim()) {
+      return color.trim();
+    }
+
+    return undefined;
+  }
+
+  async updatePhoto(
+    nik: string,
+    photo?: string,
+    color?: string,
+    file?: Express.Multer.File,
+  ): Promise<{ photo: string }> {
+    const existingUser = await this.prismaService.dT_USER.findUnique({ where: { nik } });
+    if (!existingUser) throw new NotFoundException('User tidak ditemukan');
+
+    const photoValue = await this.processPhotoValue(nik, file, photo, color);
+    if (!photoValue) {
+      throw new BadRequestException('Foto atau warna tidak boleh kosong');
+    }
+
+    await this.prismaService.dT_USER.update({
+      where: { nik },
+      data: { photo: photoValue },
+    });
+
+    return { photo: photoValue };
   }
 
   async isActive(nik: string): Promise<boolean> {

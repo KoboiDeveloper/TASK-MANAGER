@@ -23,8 +23,6 @@ import { AuthGuard } from '../security/authGuard';
 import { Roles } from '../security/roles.decorator';
 import { DT_USER } from '@prisma/client';
 import { RequestRepairTransactionDto } from './dto/request/requestTicketCommand';
-import { EventPattern, Payload } from '@nestjs/microservices';
-import { ResponseTicketCommand } from './dto/response/responseTicketCommand';
 import multer from 'multer';
 import { UserTicketSummaryDto } from './dto/response/responseTIcket.dto';
 
@@ -161,17 +159,6 @@ export class TicketController {
     try {
       const data = await this.ticketService.getTicketByStoreId(idStore);
       return new CommonResponse('Ticket by Store', HttpStatus.OK, data);
-    } catch (e) {
-      return handleException((e as Error).message);
-    }
-  }
-
-  @EventPattern()
-  async handleTicketStatusUpdated(@Payload() payload: ResponseTicketCommand) {
-    try {
-      console.log('📥 Received event REPAIR.STATUS.UPDATED');
-      const result = await this.ticketService.TicketStatusUpdated(payload);
-      return new CommonResponse('ticket status updated', HttpStatus.OK, result);
     } catch (e) {
       return handleException((e as Error).message);
     }

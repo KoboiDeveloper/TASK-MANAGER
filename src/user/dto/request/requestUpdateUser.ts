@@ -73,4 +73,8 @@ export class RequestUpdateUser {
   @IsOptional()
   @IsString({ message: 'Departemen harus berupa string' })
   departemen?: string;
+
+  @IsOptional()
+  @IsString({ message: 'notificationPrefs harus berupa string' })
+  notificationPrefs?: string;
 }

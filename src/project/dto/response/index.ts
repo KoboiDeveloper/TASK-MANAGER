@@ -17,6 +17,21 @@ export type ViewItem = {
   settings?: string | null;
 };
 
+export type ActivityResponse = {
+  id: string;
+  projectId: string;
+  taskid?: string | null;
+  nik: string;
+  action: string;
+  details?: string | null;
+  createdAt: Date | string;
+  user?: {
+    nik: string;
+    nama: string;
+    photo?: string | null;
+  } | null;
+};
+
 export type ProjectDetail = {
   id: string;
   shortId?: string | null;
@@ -31,7 +46,7 @@ export type ProjectDetail = {
   createdAt?: Date;
   isArchive?: boolean;
   members: ProjectMemberFlat[];
-  activities: LOG_ACTIVITY[] | null;
+  activities: ActivityResponse[] | null;
 };
 type Assignees = {
   nik: string;
@@ -78,6 +93,8 @@ export type TaskNonSection = {
 export type SectionGroup = {
   id: string;
   name: string;
+  category?: string;
+  rank?: string;
   tasks: TaskNonSection[];
 };
 export type TaskSectionResponse = {

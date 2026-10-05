@@ -4,6 +4,7 @@ import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../../prisma/prisma.service';
 import { DT_IMAGES } from '@prisma/client';
 import { DropboxStorageService } from '../../storage/dropbox.storage.service';
+import { MailService } from '../mail/mail.service';
 
 type ImageRow = Pick<DT_IMAGES, 'id' | 'url' | 'createdAt'>;
 
@@ -66,6 +67,7 @@ export class CronjobService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly storageService: DropboxStorageService,
+    private readonly mailService: MailService,
   ) {}
 
   /** ⏱ TEST: tanggal 29 jam 16:49 WIB (ganti ke '0 0 0 29 * *' untuk produksi) */
@@ -141,5 +143,188 @@ export class CronjobService {
       `Done monthly cleanup: checked=${checked} deleted=${deleted} blobErrors=${blobErrors} in ${durationMs}ms`,
     );
     return { checked, deleted, blobErrors, durationMs };
+  }
+
+  /**
+   * ⏰ Daily Task Reminders & Standup Digest
+   * Berjalan setiap hari pada pukul 09:00 WIB
+   * Mengirim ringkasan tugas: overdue & jatuh tempo hari ini/besok ke masing-masing assignee
+   */
+  @Cron('0 0 9 * * *', { timeZone: 'Asia/Jakarta' })
+  async sendDailyTaskRemindersAndDigest(): Promise<{
+    usersProcessed: number;
+    emailsSent: number;
+    durationMs: number;
+  }> {
+    const started = Date.now();
+    this.logger.log('Starting daily task reminder & digest cronjob...');
+
+    const WIB_OFFSET_MS = 7 * 60 * 60 * 1000;
+    const nowUtc = new Date();
+    const nowWib = new Date(nowUtc.getTime() + WIB_OFFSET_MS);
+
+    const y = nowWib.getUTCFullYear();
+    const m = nowWib.getUTCMonth();
+    const d = nowWib.getUTCDate();
+
+    const todayStartUtc = new Date(Date.UTC(y, m, d, 0, 0, 0, 0) - WIB_OFFSET_MS);
+    const todayEndUtc = new Date(Date.UTC(y, m, d, 23, 59, 59, 999) - WIB_OFFSET_MS);
+
+    // Ambil semua task belum selesai dari project aktif yang memiliki deadline
+    const tasks = await this.prisma.dT_TASK.findMany({
+      where: {
+        status: false,
+        project: { isArchive: false },
+        dueDate: { not: null },
+      },
+      select: {
+        id: true,
+        shortId: true,
+        name: true,
+        dueDate: true,
+        id_dt_project: true,
+        project: {
+          select: {
+            id: true,
+            shortId: true,
+            name: true,
+          },
+        },
+        assignees: {
+          include: {
+            user: {
+              select: {
+                nik: true,
+                nama: true,
+                email: true,
+                notificationPrefs: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    // Peta user ke task overdue dan dueToday
+    type UserTaskItem = {
+      id: string;
+      name: string;
+      projectId: string;
+      projectName: string;
+      dueDate?: Date | null;
+      daysOverdue?: number;
+    };
+
+    const userDigestMap = new Map<
+      string,
+      {
+        user: { nik: string; nama: string; email: string };
+        overdue: Array<UserTaskItem & { daysOverdue: number }>;
+        dueToday: Array<UserTaskItem>;
+      }
+    >();
+
+    for (const t of tasks) {
+      if (!t.dueDate) continue;
+
+      const isOverdue = t.dueDate < todayStartUtc;
+      const isDueToday = t.dueDate >= todayStartUtc && t.dueDate <= todayEndUtc;
+
+      if (!isOverdue && !isDueToday) continue;
+
+      const daysOverdue = isOverdue
+        ? Math.max(
+            1,
+            Math.ceil((todayStartUtc.getTime() - t.dueDate.getTime()) / (1000 * 60 * 60 * 24)),
+          )
+        : 0;
+
+      const projectId = t.project?.shortId || t.project?.id || t.id_dt_project;
+      const projectName = t.project?.name || 'Project';
+      const taskId = t.shortId || t.id;
+
+      for (const a of t.assignees) {
+        if (!a.user || !a.user.email) continue;
+        const nik = a.user.nik;
+
+        // Cek preferensi email ringkasan harian
+        if (a.user.notificationPrefs) {
+          try {
+            const prefs = JSON.parse(a.user.notificationPrefs);
+            if (prefs.emailDailyDigest === false) continue;
+          } catch {
+            // fallback default ON
+          }
+        }
+
+        if (!userDigestMap.has(nik)) {
+          userDigestMap.set(nik, {
+            user: { nik, nama: a.user.nama, email: a.user.email },
+            overdue: [],
+            dueToday: [],
+          });
+        }
+
+        const entry = userDigestMap.get(nik)!;
+        if (isOverdue) {
+          entry.overdue.push({
+            id: taskId,
+            name: t.name,
+            projectId,
+            projectName,
+            dueDate: t.dueDate,
+            daysOverdue,
+          });
+        } else if (isDueToday) {
+          entry.dueToday.push({
+            id: taskId,
+            name: t.name,
+            projectId,
+            projectName,
+            dueDate: t.dueDate,
+          });
+        }
+      }
+    }
+
+    let emailsSent = 0;
+    const usersProcessed = userDigestMap.size;
+
+    for (const [nik, data] of userDigestMap.entries()) {
+      try {
+        // Hitung total active task yang diemban user
+        const totalActiveTasks = await this.prisma.dT_ASSIGNEE_TASK.count({
+          where: {
+            nik,
+            task: {
+              status: false,
+              project: { isArchive: false },
+            },
+          },
+        });
+
+        await this.mailService.sendDailyDigestEmail({
+          to: data.user.email,
+          userName: data.user.nama,
+          dueToday: data.dueToday,
+          overdue: data.overdue,
+          totalActiveTasks,
+        });
+
+        emailsSent++;
+      } catch (err) {
+        this.logger.error(
+          `Failed sending daily digest to ${data.user.email} (${nik}):`,
+          err instanceof Error ? err.stack : String(err),
+        );
+      }
+    }
+
+    const durationMs = Date.now() - started;
+    this.logger.log(
+      `Daily task reminder cronjob completed: ${emailsSent} emails sent out of ${usersProcessed} users in ${durationMs}ms`,
+    );
+
+    return { usersProcessed, emailsSent, durationMs };
   }
 }

@@ -24,6 +24,7 @@ import { RequestUpdateUser } from './dto/request/requestUpdateUser';
 import { ResponseListUsersDto, ResponseUserContains } from './dto/response-users.dto';
 import { ChangePasswordDto } from './dto/request/requestChangePassword';
 import { OwnerGuard } from '../security/own-guard';
+import { Own } from '../security/own.decorator';
 import { Response } from 'express';
 import { FileFieldsInterceptor } from '@nestjs/platform-express';
 import multer from 'multer';
@@ -116,7 +117,8 @@ export class UserController {
     }
   }
 
-  @Roles('SUPER')
+  @UseGuards(AuthGuard, OwnerGuard)
+  @Own()
   @Patch('/update/:nik')
   @HttpCode(HttpStatus.OK)
   @UseInterceptors(
@@ -142,6 +144,35 @@ export class UserController {
       return handleException(message as string);
     }
   }
+
+  @UseGuards(AuthGuard, OwnerGuard)
+  @Own()
+  @Patch('/photo/:nik')
+  @HttpCode(HttpStatus.OK)
+  @UseInterceptors(
+    FileFieldsInterceptor(
+      [
+        { name: 'photo', maxCount: 1 },
+        { name: 'file', maxCount: 1 },
+      ],
+      { storage: multer.memoryStorage() },
+    ),
+  )
+  async updatePhoto(
+    @Param('nik') nik: string,
+    @Body() body: { photo?: string; color?: string },
+    @UploadedFiles()
+    files?: { photo?: Express.Multer.File[]; file?: Express.Multer.File[] },
+  ) {
+    try {
+      const photoFile = files?.photo?.[0] || files?.file?.[0];
+      const result = await this.userService.updatePhoto(nik, body?.photo, body?.color, photoFile);
+      return new CommonResponse('Photo updated successfully', HttpStatus.OK, result);
+    } catch ({ message }) {
+      return handleException(message as string);
+    }
+  }
+
   @Roles('SUPER')
   @Patch('/reset-password/:nik')
   @HttpCode(HttpStatus.OK)

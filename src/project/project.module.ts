@@ -9,6 +9,8 @@ import { PrismaModule } from '../prisma/prisma.module';
 import { MulterModule } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
 import { StorageModule } from '../storage/storage.module';
+import { ProjectGateway } from './project.gateway';
+import { CronjobModule } from '../utils/cronjob/cronjob.module';
 
 const allowedMimes = [
   // Images
@@ -56,9 +58,10 @@ const fileFilter = (
     PrismaModule,
     UserModule,
     MailModule,
+    CronjobModule,
   ],
   controllers: [ProjectController],
-  providers: [ProjectService],
-  exports: [ProjectService],
+  providers: [ProjectService, ProjectGateway],
+  exports: [ProjectService, ProjectGateway],
 })
 export class ProjectModule {}

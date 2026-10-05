@@ -1,6 +1,6 @@
 {
   "compilerOptions": {
-    "types": ["node", "express"],
+    "types": ["node", "express", "jest"],
     "esModuleInterop": true,
     "module": "commonjs",
     "declaration": true,

@@ -40,6 +40,9 @@ export class AuthGuard implements CanActivate {
         secret: this.mustGetEnv('SECRET_KEY'),
         issuer: this.mustGetEnv('ISSUER_STAMP'),
       });
+      if ((request.user as any)?.type === 'refresh') {
+        throw new UnauthorizedException('Invalid token type');
+      }
     } catch (error) {
       console.error('JWT verification error:', error);
       throw new UnauthorizedException('Invalid or expired token');
@@ -56,7 +59,14 @@ export class AuthGuard implements CanActivate {
   }
   private extractToken(request: Request): string | undefined {
     const cookies = request.cookies as Record<string, string>;
-    return cookies?.['access_token'];
+    if (cookies?.['access_token']) {
+      return cookies['access_token'];
+    }
+    const authHeader = request.headers['authorization'];
+    if (authHeader && typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
+      return authHeader.slice(7).trim();
+    }
+    return undefined;
   }
 
   private mustGetEnv(key: string): string {

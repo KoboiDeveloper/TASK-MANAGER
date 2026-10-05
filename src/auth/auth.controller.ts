@@ -7,6 +7,7 @@ import {
   Post,
   Req,
   Res,
+  UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
 import { Response, Request } from 'express';
@@ -14,6 +15,7 @@ import { AuthService } from './auth.service';
 import { CommonResponse } from '../common/commonResponse';
 import { LoginRequest } from './dto/request/loginRequest';
 import { LoginResponse } from './dto/response/loginResponse';
+import { RefreshTokenRequest } from './dto/request/refreshTokenRequest';
 import { AuthGuard } from '../security/authGuard';
 import { DT_USER } from '@prisma/client';
 import { ForgotPwRequest } from './dto/request/forgotPwRequest';
@@ -24,36 +26,113 @@ import { handleException } from '../utils/handleException';
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
+  private setAuthCookies(res: Response, tokens: LoginResponse) {
+    const isProd = process.env.NODE_ENV === 'production';
+
+    // Access Token: 15 menit
+    res.cookie('access_token', tokens.token, {
+      path: '/',
+      httpOnly: true,
+      secure: isProd,
+      sameSite: 'lax',
+      maxAge: 1000 * 60 * 15,
+    });
+
+    // Refresh Token: 7 hari
+    if (tokens.refreshToken) {
+      res.cookie('refresh_token', tokens.refreshToken, {
+        path: '/',
+        httpOnly: true,
+        secure: isProd,
+        sameSite: 'lax',
+        maxAge: 1000 * 60 * 60 * 24 * 7,
+      });
+    }
+  }
+
+  private clearAuthCookies(res: Response) {
+    const isProd = process.env.NODE_ENV === 'production';
+    const clearOpts = {
+      path: '/',
+      httpOnly: true,
+      secure: isProd,
+      sameSite: 'lax' as const,
+    };
+    res.clearCookie('access_token', clearOpts);
+    res.clearCookie('refresh_token', clearOpts);
+  }
+
   @Post('login')
   @HttpCode(HttpStatus.OK)
   async login(@Body() request: LoginRequest, @Res({ passthrough: true }) res: Response) {
     try {
       const result: LoginResponse = await this.authService.validateUser(request);
+      this.setAuthCookies(res, result);
 
-      res.cookie('access_token', result.token, {
-        path: '/',
-        httpOnly: true,
-        secure: true,
-        sameSite: 'lax',
-        maxAge: 1000 * 60 * 60 * 24, // 1 day
-      });
-
-      return new CommonResponse('Login Successful', HttpStatus.OK, 'Login Successful');
+      return new CommonResponse('Login Successful', HttpStatus.OK, result);
     } catch ({ message }) {
       return handleException(message as string);
     }
   }
-  @UseGuards(AuthGuard)
+
+  @Post('refresh')
+  @HttpCode(HttpStatus.OK)
+  async refresh(
+    @Req() req: Request,
+    @Body() body: RefreshTokenRequest,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    try {
+      const cookieToken = (req.cookies as Record<string, string>)?.['refresh_token'];
+      const headerToken =
+        (req.headers['x-refresh-token'] as string) ||
+        (req.headers['authorization']?.startsWith('Bearer ')
+          ? req.headers['authorization'].slice(7).trim()
+          : undefined);
+      const bodyToken = body?.refreshToken;
+
+      const tokenToVerify = cookieToken || headerToken || bodyToken;
+
+      if (!tokenToVerify) {
+        throw new UnauthorizedException('Refresh token not found');
+      }
+
+      const result = await this.authService.refreshToken(tokenToVerify);
+      this.setAuthCookies(res, result);
+
+      return new CommonResponse('Token refreshed successfully', HttpStatus.OK, result);
+    } catch (err) {
+      // Clear cookies on refresh failure (e.g. reuse detected or token expired)
+      this.clearAuthCookies(res);
+      if (err instanceof UnauthorizedException || err?.status === 401) {
+        throw err;
+      }
+      return handleException((err as Error).message);
+    }
+  }
+
   @Post('logout')
   @HttpCode(HttpStatus.OK)
-  logout(@Res({ passthrough: true }) res: Response) {
+  async logout(
+    @Req() req: Request,
+    @Body() body: RefreshTokenRequest,
+    @Res({ passthrough: true }) res: Response,
+  ) {
     try {
-      res.clearCookie('access_token', {
-        path: '/',
-        httpOnly: true,
-        secure: false,
-        sameSite: 'lax',
-      });
+      const cookieToken = (req.cookies as Record<string, string>)?.['refresh_token'];
+      const headerToken =
+        (req.headers['x-refresh-token'] as string) ||
+        (req.headers['authorization']?.startsWith('Bearer ')
+          ? req.headers['authorization'].slice(7).trim()
+          : undefined);
+      const bodyToken = body?.refreshToken;
+      const token = cookieToken || headerToken || bodyToken;
+
+      if (token) {
+        await this.authService.revokeToken(token);
+      }
+
+      this.clearAuthCookies(res);
 
       return new CommonResponse(
         'Logged out successfully',

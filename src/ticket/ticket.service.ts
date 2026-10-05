@@ -5,7 +5,6 @@ import { CreateTicketDto } from './dto/request/requestCreateTicket.dto';
 import { assertImageFile, safePathname, getOriginalName } from '../utils/file';
 import { normalizeErrMsg } from '../utils/string';
 import { RequestRepairTransactionDto } from './dto/request/requestTicketCommand';
-import { ClientProxy } from '@nestjs/microservices';
 import { EStatus } from '../constant/EStatus';
 import { ResponseTicketCommand } from './dto/response/responseTicketCommand';
 import { TicketListResponseDto, UserTicketSummaryDto } from './dto/response/responseTIcket.dto';
@@ -19,7 +18,6 @@ export class TicketService {
     private readonly prismaService: PrismaService,
     private readonly userService: UserService,
     private readonly storageService: DropboxStorageService,
-    @Inject('STORE_CLIENT') private readonly client: ClientProxy,
   ) {}
 
   private async pickNextAdminNik(category: string): Promise<string> {
@@ -124,7 +122,11 @@ export class TicketService {
           type: file.mimetype || 'application/octet-stream',
         });
 
-        const uploaded = await this.storageService.uploadFile(pathname, file.buffer, file.mimetype || 'application/octet-stream');
+        const uploaded = await this.storageService.uploadFile(
+          pathname,
+          file.buffer,
+          file.mimetype || 'application/octet-stream',
+        );
 
         await this.prismaService.dT_IMAGES.create({
           data: {
@@ -165,7 +167,7 @@ export class TicketService {
     } = data;
 
     // ✅ UPLOAD IMAGES DULU (sebelum transaksi DB)
-    let uploadedImages: Array<{
+    const uploadedImages: Array<{
       url: string;
       filename: string;
       mimeType: string;
@@ -175,17 +177,17 @@ export class TicketService {
 
     if (files?.length) {
       this.logger.log(`Ticket ${id}: Uploading ${files.length} image(s) to Dropbox...`);
-      
+
       // Upload semua images dulu
       for (const file of files) {
         try {
           assertImageFile(file);
           const pathname = safePathname(getOriginalName(file) ?? 'upload.bin', id);
-          
+
           const uploaded = await this.storageService.uploadFile(
             pathname,
             file.buffer,
-            file.mimetype || 'application/octet-stream'
+            file.mimetype || 'application/octet-stream',
           );
 
           uploadedImages.push({
@@ -198,16 +200,16 @@ export class TicketService {
         } catch (e) {
           const name = getOriginalName(file);
           this.logger.error(`Ticket ${id}: Upload image "${name}" FAILED`);
-          
+
           // ⚠️ ROLLBACK: Hapus semua images yang sudah ter-upload
           await this.rollbackUploadedImages(uploadedImages, id);
-          
+
           throw new BadRequestException(
-            `Gagal upload gambar "${name}": ${normalizeErrMsg(e)}. Ticket tidak dibuat.`
+            `Gagal upload gambar "${name}": ${normalizeErrMsg(e)}. Ticket tidak dibuat.`,
           );
         }
       }
-      
+
       this.logger.log(`Ticket ${id}: ${uploadedImages.length} image(s) uploaded successfully`);
     }
 
@@ -253,7 +255,7 @@ export class TicketService {
       // ⚠️ ROLLBACK: Hapus semua images dari Dropbox jika DB save gagal
       this.logger.error(`Ticket ${id}: Failed to save to DB, rolling back...`);
       await this.rollbackUploadedImages(uploadedImages, id);
-      
+
       throw new BadRequestException(`Gagal membuat ticket: ${normalizeErrMsg(e)}`);
     }
   }
@@ -266,7 +268,7 @@ export class TicketService {
     if (images.length === 0) return;
 
     this.logger.warn(`Ticket ${ticketId}: Rolling back ${images.length} uploaded image(s)...`);
-    
+
     for (const img of images) {
       try {
         await this.storageService.deleteFile(img.url);
@@ -327,7 +329,10 @@ export class TicketService {
       where.idStore = { contains: idStore.trim() };
     }
     if (handlerNik && handlerNik.trim()) {
-      const handlerList = handlerNik.split(',').map((h) => h.trim()).filter(Boolean);
+      const handlerList = handlerNik
+        .split(',')
+        .map((h) => h.trim())
+        .filter(Boolean);
       if (handlerList.length === 1) {
         where.handlerNik = handlerList[0];
       } else if (handlerList.length > 1) {
@@ -335,7 +340,10 @@ export class TicketService {
       }
     }
     if (status && status.trim()) {
-      const statusList = status.split(',').map((s) => s.trim()).filter(Boolean);
+      const statusList = status
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
       if (statusList.length === 1) {
         where.status = statusList[0];
       } else if (statusList.length > 1) {
@@ -524,10 +532,6 @@ export class TicketService {
   }
 
   async repairtPayment(data: RequestRepairTransactionDto): Promise<string> {
-    const routingKey = `STORE.${data.idStore}.COMMAND`;
-    this.client.emit<RequestRepairTransactionDto>(routingKey, data);
-    console.log('📤 Sending to MQ:', routingKey, data);
-
     await this.prismaService.dT_TICKET.update({
       where: { id: data.ticketId },
       data: {
@@ -535,17 +539,7 @@ export class TicketService {
       },
     });
 
-    // type SPResponse = { Id: string; Nama: string; CreatedAt: Date };
-
-    // await this.prismaService.$queryRaw<SPResponse[]>`
-    // EXEC SP_CHANGE_PAYMENT_TRANSACTION
-    // @ID_TR_SALES_HEADER = ${data.payload.ID_TR_SALES_HEADER},
-    // @FromPaymentType = ${data.payload.fromPaymentType},
-    // @ToPaymentType = ${data.payload.toPaymentType},
-    // @DirectSelling = ${data.payload.directSelling ? 1 : 0},
-    // @GrandTotal = ${data.payload.grandTotal};
-    // `;
-    return 'repair payment request sent';
+    return 'repair payment request processed';
   }
   //by listener
   async TicketStatusUpdated(data: ResponseTicketCommand) {

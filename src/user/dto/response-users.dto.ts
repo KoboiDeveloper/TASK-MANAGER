@@ -9,6 +9,7 @@ export class ResponseListUsersDto {
   photo: string | null;
   departement?: string | null;
   departemen?: string | null;
+  notificationPrefs?: string | null;
 }
 
 export class ResponseUserContains {

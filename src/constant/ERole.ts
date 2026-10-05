@@ -3,4 +3,3 @@ export enum ERole {
   SUPER = 'SUPER',
   ADMIN = 'ADMIN',
 }
-

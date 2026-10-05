@@ -1,13 +1,13 @@
 import { BadRequestException } from '@nestjs/common';
 
-const MAX_IMAGE_BYTES = 1024 * 1024; // 1MB
+const MAX_IMAGE_BYTES = 2 * 1024 * 1024; // 2MB
 const IMAGE_MIME_RE = /^image\/(png|jpe?g|webp|gif|bmp|avif)$/i;
 
 export function assertImageFile(file?: Express.Multer.File): asserts file is Express.Multer.File {
   if (!file) throw new BadRequestException('File wajib diunggah');
   if (!IMAGE_MIME_RE.test(file.mimetype))
     throw new BadRequestException('Tipe file tidak diizinkan');
-  if (file.size > MAX_IMAGE_BYTES) throw new BadRequestException('Maksimum ukuran gambar 1MB');
+  if (file.size > MAX_IMAGE_BYTES) throw new BadRequestException('Maksimum ukuran gambar 2MB');
 }
 
 export function safePathname(filename: string, ticketId?: string | null): string {

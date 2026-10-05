@@ -17,7 +17,9 @@ export class DropboxStorageService implements IStorageService {
     const accessToken = process.env.DROPBOX_ACCESS_TOKEN;
 
     if (!clientId || !clientSecret) {
-      throw new Error('DROPBOX_CLIENT_ID dan DROPBOX_CLIENT_SECRET wajib diisi di environment variables');
+      throw new Error(
+        'DROPBOX_CLIENT_ID dan DROPBOX_CLIENT_SECRET wajib diisi di environment variables',
+      );
     }
 
     if (refreshToken) {
@@ -32,9 +34,13 @@ export class DropboxStorageService implements IStorageService {
     } else if (accessToken) {
       // ⚠️ FALLBACK: Access token sementara (expired dalam 4 jam!)
       this.dropbox = new Dropbox({ accessToken });
-      this.logger.warn('⚠️  DropboxStorageService menggunakan ACCESS TOKEN sementara (akan expired ~4 jam). Segera set DROPBOX_REFRESH_TOKEN!');
+      this.logger.warn(
+        '⚠️  DropboxStorageService menggunakan ACCESS TOKEN sementara (akan expired ~4 jam). Segera set DROPBOX_REFRESH_TOKEN!',
+      );
     } else {
-      throw new Error('DROPBOX_REFRESH_TOKEN atau DROPBOX_ACCESS_TOKEN harus diset di environment variables');
+      throw new Error(
+        'DROPBOX_REFRESH_TOKEN atau DROPBOX_ACCESS_TOKEN harus diset di environment variables',
+      );
     }
 
     this.basePath = process.env.DROPBOX_FOLDER_PATH || '/task-manager-files';
@@ -117,8 +123,10 @@ export class DropboxStorageService implements IStorageService {
       this.logger.log(`File deleted successfully: ${dropboxPath}`);
     } catch (error: any) {
       // Ignore jika file tidak ditemukan
-      if (error?.error?.error?.['.tag'] === 'path_lookup' &&
-          error?.error?.error?.path_lookup?.['.tag'] === 'not_found') {
+      if (
+        error?.error?.error?.['.tag'] === 'path_lookup' &&
+        error?.error?.error?.path_lookup?.['.tag'] === 'not_found'
+      ) {
         this.logger.warn(`File not found for deletion: ${path}`);
         return;
       }

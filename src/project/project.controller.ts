@@ -95,6 +95,20 @@ export class ProjectController {
     }
   }
 
+  @Get(':projectId/activities')
+  @UseGuards(ProjectMemberGuard)
+  async getActivities(@Param('projectId') projectId: string, @Query('limit') limit?: string) {
+    try {
+      const data = await this.projectService.getProjectActivities(
+        projectId,
+        limit ? parseInt(limit, 10) : 50,
+      );
+      return new CommonResponse('Get project activities success', HttpStatus.OK, data);
+    } catch ({ message }) {
+      return handleException(message as string);
+    }
+  }
+
   @Post()
   async create(
     @Body() dto: CreateProjectRequest,
@@ -115,8 +129,13 @@ export class ProjectController {
   async updateProject(
     @Param('projectId') projectId: string,
     @Body() body: UpdateProjectRequest,
+    @Req() req: Request & { user?: AuthUser },
   ) {
-    const updateResponse: string = await this.projectService.updateProjectById(projectId, body);
+    const updateResponse: string = await this.projectService.updateProjectById(
+      projectId,
+      body,
+      req.user?.nik,
+    );
     return new CommonResponse('Project updated successfully', HttpStatus.OK, updateResponse);
   }
 
@@ -143,9 +162,14 @@ export class ProjectController {
   async syncProjectMembers(
     @Param('projectId') projectId: string,
     @Body() body: { members: MemberRequest[] },
+    @Req() req: Request & { user?: Pick<AuthUser, 'nik'> },
   ): Promise<CommonResponse<{ nik: string; nama: string }[] | null>> {
     try {
-      const finalMembers = await this.projectService.syncProjectMembers(projectId, body.members);
+      const finalMembers = await this.projectService.syncProjectMembers(
+        projectId,
+        body.members,
+        req.user?.nik,
+      );
 
       return new CommonResponse('Project members synced successfully', HttpStatus.OK, finalMembers);
     } catch ({ message }) {
@@ -220,9 +244,14 @@ export class ProjectController {
   async uploadTaskAttachments(
     @Param('taskId') taskId: string,
     @UploadedFiles() attachments: Express.Multer.File[],
+    @Req() req: Request & { user?: AuthUser },
   ) {
     try {
-      const message = await this.projectService.AddTaskAttachments(taskId, attachments);
+      const message = await this.projectService.AddTaskAttachments(
+        taskId,
+        attachments,
+        req.user?.nik,
+      );
       return new CommonResponse(message || 'Attachments uploaded successfully', HttpStatus.OK, {
         taskId,
         count: attachments?.length ?? 0,
@@ -271,7 +300,7 @@ export class ProjectController {
     data: UpdateTaskRequest,
   ) {
     try {
-      const updated = await this.projectService.updateTask(taskId, data);
+      const updated = await this.projectService.updateTask(taskId, data, _req.user?.nik);
       return new CommonResponse('Task updated successfully', HttpStatus.OK, updated);
     } catch ({ message }) {
       return handleException(message as string);
@@ -281,9 +310,9 @@ export class ProjectController {
   @Delete('tasks/:taskId/delete')
   @UseGuards(ProjectMemberGuard)
   @ProjectRoles(EProjectRole.OWNER, EProjectRole.EDITOR)
-  async deleteTask(@Param('taskId') taskId: string) {
+  async deleteTask(@Param('taskId') taskId: string, @Req() req: Request & { user?: AuthUser }) {
     try {
-      const deleteTask = await this.projectService.deleteTaskId(taskId);
+      const deleteTask = await this.projectService.deleteTaskId(taskId, req.user?.nik);
       return new CommonResponse('Task delete successfully', HttpStatus.OK, deleteTask);
     } catch (e: any) {
       return handleException(e?.message || String(e));
@@ -311,8 +340,12 @@ export class ProjectController {
 
   @Put('subtask/:subtaskId')
   @UseGuards(ProjectMemberGuard)
-  async updateSubTask(@Param('subtaskId') subtaskId: string, @Body() dto: UpdateSubTaskRequest) {
-    const updated = await this.projectService.updateSubTask(subtaskId, dto);
+  async updateSubTask(
+    @Param('subtaskId') subtaskId: string,
+    @Body() dto: UpdateSubTaskRequest,
+    @Req() req: Request & { user?: AuthUser },
+  ) {
+    const updated = await this.projectService.updateSubTask(subtaskId, dto, req.user?.nik);
     return new CommonResponse('Subtask updated successfully', HttpStatus.OK, updated);
   }
 
@@ -325,10 +358,7 @@ export class ProjectController {
 
   @Patch('subtask/:subtaskId/move')
   @UseGuards(ProjectMemberGuard)
-  async moveSubTask(
-    @Param('subtaskId') subtaskId: string,
-    @Body() body: MoveSubTaskRequest,
-  ) {
+  async moveSubTask(@Param('subtaskId') subtaskId: string, @Body() body: MoveSubTaskRequest) {
     const updated = await this.projectService.moveSubTask(subtaskId, body);
     return new CommonResponse('Subtask moved successfully', HttpStatus.OK, updated);
   }
@@ -345,8 +375,7 @@ export class ProjectController {
       const payload: PromoteSubTaskRequest = {};
       if ('targetSectionId' in body) {
         const raw = body.targetSectionId;
-        payload.targetSectionId =
-          raw === 'unlocated' || raw === 'null' ? null : (raw ?? null);
+        payload.targetSectionId = raw === 'unlocated' || raw === 'null' ? null : (raw ?? null);
       }
       if ('beforeId' in body) payload.beforeId = body.beforeId ?? null;
       if ('afterId' in body) payload.afterId = body.afterId ?? null;
@@ -405,10 +434,16 @@ export class ProjectController {
   @ProjectRoles(EProjectRole.OWNER, EProjectRole.EDITOR)
   async addSection(
     @Param('projectId') projectId: string,
-    @Body() data: { name: string },
+    @Body() data: { name: string; category?: string },
+    @Req() req: Request & { user?: AuthUser },
   ) {
     try {
-      const section = await this.projectService.createSection(projectId, data.name);
+      const section = await this.projectService.createSection(
+        projectId,
+        data.name,
+        data.category,
+        req.user?.nik,
+      );
       return new CommonResponse('Add section successfully', HttpStatus.OK, section);
     } catch ({ message }) {
       return handleException(message as string);
@@ -441,14 +476,18 @@ export class ProjectController {
   async deleteSection(
     @Param() { projectId, sectionId }: RemoveSectionParamsDto,
     @Query() query: RemoveSectionQueryDto,
+    @Req() req: Request & { user?: AuthUser },
   ) {
     try {
       const includeTask = query.includeTask ?? false;
-      const deleted = await this.projectService.removeSection({
-        projectId,
-        sectionId,
-        includeTask,
-      });
+      const deleted = await this.projectService.removeSection(
+        {
+          projectId,
+          sectionId,
+          includeTask,
+        },
+        req.user?.nik,
+      );
       return new CommonResponse('Section deleted successfully', HttpStatus.OK, deleted);
     } catch ({ message }) {
       return handleException(message as string);
@@ -461,10 +500,10 @@ export class ProjectController {
   async renameSection(
     @Param('projectId') projectId: string,
     @Param('sectionId') sectionId: string,
-    @Body() body: { name: string },
+    @Body() body: { name?: string; category?: string },
   ) {
     try {
-      const updated = await this.projectService.updateSection(sectionId, body.name);
+      const updated = await this.projectService.updateSection(sectionId, body);
       return new CommonResponse('Section renamed successfully', HttpStatus.OK, updated);
     } catch ({ message }) {
       return handleException(message as string);
@@ -477,10 +516,7 @@ export class ProjectController {
 
   @Get(':projectId/tasks')
   @UseGuards(ProjectMemberGuard)
-  async findtasks(
-    @Param('projectId') projectId: string,
-    @Query('viewId') viewId?: string,
-  ) {
+  async findtasks(@Param('projectId') projectId: string, @Query('viewId') viewId?: string) {
     try {
       const tasks = await this.projectService.findTasksAndSections(projectId, viewId);
       return new CommonResponse('Get Tasks success', HttpStatus.OK, tasks);
@@ -518,10 +554,7 @@ export class ProjectController {
   @Post(':projectId/view')
   @UseGuards(ProjectMemberGuard)
   @ProjectRoles(EProjectRole.OWNER, EProjectRole.EDITOR)
-  async createView(
-    @Param('projectId') projectId: string,
-    @Body() dto: CreateViewRequest,
-  ) {
+  async createView(@Param('projectId') projectId: string, @Body() dto: CreateViewRequest) {
     try {
       const view = await this.projectService.createView(
         projectId,
@@ -570,10 +603,7 @@ export class ProjectController {
   @Delete(':projectId/view/:viewId')
   @UseGuards(ProjectMemberGuard)
   @ProjectRoles(EProjectRole.OWNER, EProjectRole.EDITOR)
-  async deleteView(
-    @Param('projectId') projectId: string,
-    @Param('viewId') viewId: string,
-  ) {
+  async deleteView(@Param('projectId') projectId: string, @Param('viewId') viewId: string) {
     try {
       const res = await this.projectService.deleteView(projectId, viewId);
       return new CommonResponse('View deleted successfully', HttpStatus.OK, res);
@@ -581,4 +611,15 @@ export class ProjectController {
       return handleException(message as string);
     }
   }
+
+  @Post('cron/trigger-daily-digest')
+  async triggerDailyDigest() {
+    try {
+      const result = await this.projectService.triggerDailyDigest();
+      return new CommonResponse('Daily digest triggered successfully', HttpStatus.OK, result);
+    } catch ({ message }) {
+      return handleException(message as string);
+    }
+  }
 }
+

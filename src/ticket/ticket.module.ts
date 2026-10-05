@@ -4,32 +4,11 @@ import { TicketController } from './ticket.controller';
 import { MulterModule } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
 import { UserModule } from '../user/user.module';
-import { ClientsModule, Transport } from '@nestjs/microservices';
-import process from 'node:process';
 import { StorageModule } from '../storage/storage.module';
 @Module({
   imports: [
     StorageModule,
     UserModule,
-    ClientsModule.register([
-      {
-        name: 'STORE_CLIENT',
-        transport: Transport.RMQ,
-        options: {
-          urls: [process.env.RABBITMQ_URL!],
-          exchange: 'REPAIR_TRANSACTION',
-          exchangeType: 'topic',
-          persistent: true,
-          wildcards: true,
-          queue: 'STATUS_REPAIR',
-          queueOptions: {
-            durable: true,
-            arguments: { 'x-queue-type': 'quorum' },
-          },
-        },
-      },
-    ]),
-
     MulterModule.register({
       storage: memoryStorage(),
       limits: { fileSize: 1 * 1024 * 1024 },
@@ -38,7 +17,6 @@ import { StorageModule } from '../storage/storage.module';
         else cb(new Error('Tipe file tidak diizinkan'), false);
       },
     }),
-    UserModule,
   ],
   controllers: [TicketController],
   providers: [TicketService],

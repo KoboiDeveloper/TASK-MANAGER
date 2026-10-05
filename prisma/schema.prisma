@@ -18,6 +18,7 @@ model DT_USER {
   statusActive Boolean
   photo        String? @db.VarChar(500)
   departement  String? @db.VarChar(50)
+  notificationPrefs String? @db.NVarChar(Max)
 
   //relation
   role               DT_ROLE                  @relation(fields: [roleId], references: [id], onDelete: NoAction, onUpdate: NoAction)
@@ -33,6 +34,7 @@ model DT_USER {
   logs               LOG_ACTIVITY[]
   sentInvites        LOG_INVITATION_PROJECT[] @relation("SenderInvites")
   receivedInvites    LOG_INVITATION_PROJECT[] @relation("ReceiverInvites")
+  refreshTokens      LOG_REFRESH_TOKEN[]
 }
 
 model DT_ROLE {
@@ -282,6 +284,7 @@ model DT_SECTION {
   id_dt_project String     @db.UniqueIdentifier
   name          String     @db.VarChar(100)
   rank          String     @default("8000000000000000") @db.VarChar(32)
+  category      String     @default("active") @db.VarChar(20)
   // Relasi ke Project
   project       DT_PROJECT @relation(fields: [id_dt_project], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
@@ -311,15 +314,22 @@ model DT_TAG {
 ///  LOGS
 /// ================================
 model LOG_ACTIVITY {
-  id        String  @id @default(uuid()) @db.UniqueIdentifier
-  projectId String  @db.UniqueIdentifier
-  taskid    String? @db.UniqueIdentifier
-  nik       String  @db.Char(8)
-  action    String  @db.VarChar(255)
+  id        String   @id @default(uuid()) @db.UniqueIdentifier
+  projectId String   @db.UniqueIdentifier
+  taskid    String?  @db.UniqueIdentifier
+  nik       String   @db.Char(8)
+  action    String   @db.VarChar(255)
+  details   String?  @db.NVarChar(Max)
+  createdAt DateTime @default(now())
 
   project DT_PROJECT @relation(fields: [projectId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   task    DT_TASK?   @relation(fields: [taskid], references: [id], onDelete: SetNull, onUpdate: NoAction)
   user    DT_USER    @relation(fields: [nik], references: [nik], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([projectId])
+  @@index([taskid])
+  @@index([nik])
+  @@index([createdAt])
 }
 
 model LOG_INVITATION_PROJECT {
@@ -334,4 +344,19 @@ model LOG_INVITATION_PROJECT {
   project      DT_PROJECT @relation(fields: [projectId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   senderUser   DT_USER    @relation("SenderInvites", fields: [sender], references: [nik], onDelete: NoAction, onUpdate: NoAction)
   receiverUser DT_USER    @relation("ReceiverInvites", fields: [to], references: [nik], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model LOG_REFRESH_TOKEN {
+  id        String   @id @db.VarChar(64)
+  nik       String   @db.Char(8)
+  family    String   @db.VarChar(64)
+  isRevoked Boolean  @default(false)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user DT_USER @relation(fields: [nik], references: [nik], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([nik])
+  @@index([family])
 }
