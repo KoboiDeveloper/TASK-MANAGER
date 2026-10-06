@@ -846,21 +846,33 @@ export class ChatService {
     if (!msg || msg.deletedAt) throw new NotFoundException('Message not found');
     await this.assertMember(msg.roomId, nik);
 
-    let reactions = this.parseJson<ChatReaction[]>(msg.reactionsJson, []);
-    const existing = reactions.find((r) => r.emoji === dto.emoji);
-    if (!existing) {
-      reactions = [...reactions, { emoji: dto.emoji, niks: [nik] }];
-    } else if (existing.niks.includes(nik)) {
-      reactions = reactions
-        .map((r) =>
-          r.emoji === dto.emoji ? { ...r, niks: r.niks.filter((n) => n !== nik) } : r,
-        )
-        .filter((r) => r.niks.length > 0);
-    } else {
-      reactions = reactions.map((r) =>
-        r.emoji === dto.emoji ? { ...r, niks: [...r.niks, nik] } : r,
-      );
+    // Normalize: one chip per emoji, unique niks. One reaction per user (overwrite).
+    const byEmoji = new Map<string, Set<string>>();
+    for (const r of this.parseJson<ChatReaction[]>(msg.reactionsJson, [])) {
+      if (!r?.emoji) continue;
+      const set = byEmoji.get(r.emoji) ?? new Set<string>();
+      for (const n of r.niks ?? []) if (n) set.add(n);
+      byEmoji.set(r.emoji, set);
     }
+
+    let alreadyOnThis = byEmoji.get(dto.emoji)?.has(nik) ?? false;
+
+    // Strip this user from every emoji
+    for (const [emoji, set] of byEmoji) {
+      set.delete(nik);
+      if (set.size === 0) byEmoji.delete(emoji);
+    }
+
+    if (!alreadyOnThis) {
+      const set = byEmoji.get(dto.emoji) ?? new Set<string>();
+      set.add(nik);
+      byEmoji.set(dto.emoji, set);
+    }
+
+    const reactions: ChatReaction[] = [...byEmoji.entries()].map(([emoji, set]) => ({
+      emoji,
+      niks: [...set],
+    }));
 
     await this.prisma.dT_CHAT_MESSAGE.update({
       where: { id: messageId },
@@ -873,9 +885,8 @@ export class ChatService {
       reactions,
     });
 
-    const added = !existing || !existing.niks.includes(nik);
     const stillHas = reactions.some((r) => r.emoji === dto.emoji && r.niks.includes(nik));
-    if (added && stillHas) {
+    if (!alreadyOnThis && stillHas) {
       const ownerNik = msg.senderNik.trim();
       if (ownerNik && ownerNik !== nik && ownerNik !== 'system') {
         const reactor = await this.prisma.dT_USER.findUnique({
