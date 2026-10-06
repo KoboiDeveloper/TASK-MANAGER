@@ -43,6 +43,7 @@ import { EProjectRole } from '../constant/EProjectRole';
 import { DropboxStorageService } from '../storage/dropbox.storage.service';
 import { ProjectGateway } from './project.gateway';
 import { CronjobService } from '../utils/cronjob/cronjob.service';
+import { PushService } from '../notifications/push.service';
 
 @Injectable()
 export class ProjectService {
@@ -55,6 +56,7 @@ export class ProjectService {
     private readonly storageService: DropboxStorageService,
     private readonly projectGateway: ProjectGateway,
     private readonly cronjobService: CronjobService,
+    private readonly pushService: PushService,
   ) {}
 
   // =========================================================
@@ -217,6 +219,20 @@ export class ProjectService {
     const pid = (await this.resolveProjectId(id)) || id;
     const { name, desc, isArchive, members, color, icon, isPrivate, defaultPermission } = data;
 
+    const prevProject =
+      isArchive === true
+        ? await this.prismaService.dT_PROJECT.findUnique({
+            where: { id: pid },
+            select: {
+              isArchive: true,
+              name: true,
+              shortId: true,
+              id: true,
+              members: { select: { nik: true } },
+            },
+          })
+        : null;
+
     try {
       // 1) Update field project-nya (kalau ada yg dikirim)
       if (
@@ -258,6 +274,19 @@ export class ProjectService {
       // 2) Sync members kalau dikirim dari FE
       if (Array.isArray(members)) {
         await this.syncProjectMembers(pid, members);
+      }
+
+      if (prevProject && !prevProject.isArchive && isArchive === true) {
+        const effectiveProjectId = prevProject.shortId || prevProject.id;
+        this.pushService.notifyUsers(
+          prevProject.members.map((m) => m.nik),
+          {
+            type: 'project.archived',
+            title: 'Project diarsipkan',
+            body: prevProject.name,
+            url: `/dashboard/project/${effectiveProjectId}`,
+          },
+        );
       }
 
       return `Project with ${id} successfully updated`;
@@ -405,46 +434,69 @@ export class ProjectService {
     return task.shortId || task.id;
   }
 
-  // project.service.ts
   async taskOwn(nik: string): Promise<ownTaskResponse[]> {
     const tasks = await this.prismaService.dT_TASK.findMany({
       where: {
-        assignees: {
-          some: {
-            nik,
+        OR: [
+          { assignees: { some: { nik } } },
+          { createdBy: nik },
+          {
+            project: {
+              OR: [{ createdBy: nik }, { members: { some: { nik } } }],
+            },
           },
-        },
-        status: false,
+        ],
       },
+      orderBy: [{ status: 'asc' }, { createdAt: 'desc' }],
+      take: 300,
       select: {
         id: true,
         shortId: true,
         name: true,
         status: true,
         dueDate: true,
+        createdBy: true,
+        assignees: { select: { nik: true } },
         project: {
           select: {
             id: true,
             shortId: true,
             name: true,
             color: true,
+            createdBy: true,
+            members: { select: { nik: true } },
           },
         },
       },
     });
-    return tasks.map((t) => ({
-      id: t.shortId || t.id,
-      shortId: t.shortId,
-      name: t.name,
-      status: t.status,
-      dueDate: t.dueDate,
-      project: {
-        id: t.project.shortId || t.project.id,
-        shortId: t.project.shortId,
-        name: t.project.name,
-        color: t.project.color,
-      },
-    }));
+    return tasks.map((t) => {
+      const memberNiks = Array.from(
+        new Set(
+          [t.project.createdBy, ...(t.project.members ?? []).map((m) => m.nik)].filter(
+            (n): n is string => Boolean(n),
+          ),
+        ),
+      );
+      return {
+        // keep shortId-first for dashboard links; expose guid for chat
+        id: t.shortId || t.id,
+        guid: t.id,
+        shortId: t.shortId,
+        name: t.name,
+        status: t.status,
+        dueDate: t.dueDate,
+        createdBy: t.createdBy,
+        assignees: (t.assignees ?? []).map((a) => ({ nik: a.nik })),
+        project: {
+          id: t.project.shortId || t.project.id,
+          guid: t.project.id,
+          shortId: t.project.shortId,
+          name: t.project.name,
+          color: t.project.color,
+          memberNiks,
+        },
+      };
+    });
   }
 
   async updateTask(taskId: string, dto: UpdateTaskRequest, nik?: string): Promise<DT_TASK> {
@@ -452,7 +504,16 @@ export class ProjectService {
     // pastikan task ada
     const exists = await this.prismaService.dT_TASK.findUnique({
       where: { id: tid },
-      select: { id: true, name: true, status: true, id_dt_project: true, createdBy: true },
+      select: {
+        id: true,
+        shortId: true,
+        name: true,
+        status: true,
+        dueDate: true,
+        id_dt_project: true,
+        createdBy: true,
+        project: { select: { shortId: true } },
+      },
     });
     if (!exists) throw new NotFoundException(`Task ${taskId} not found`);
 
@@ -500,15 +561,18 @@ export class ProjectService {
     }
 
     let newlyAssignedNiks: string[] = [];
+    let removedAssignedNiks: string[] = [];
     if (assigneesProvided) {
       const existingAssignees = await this.prismaService.dT_ASSIGNEE_TASK.findMany({
         where: { taskId: tid },
         select: { nik: true },
       });
       const existingNikSet = new Set(existingAssignees.map((a) => this.normalizeNik(a.nik)));
-      newlyAssignedNiks = (dto.assignees || [])
-        .map((a) => this.normalizeNik(a.nik))
-        .filter((n) => Boolean(n) && !existingNikSet.has(n));
+      const nextNikSet = new Set(
+        (dto.assignees || []).map((a) => this.normalizeNik(a.nik)).filter(Boolean),
+      );
+      newlyAssignedNiks = [...nextNikSet].filter((n) => !existingNikSet.has(n));
+      removedAssignedNiks = [...existingNikSet].filter((n) => !nextNikSet.has(n));
     }
 
     // transaksi: update scalar + reset assignees bila dikirim
@@ -600,6 +664,11 @@ export class ProjectService {
         });
       }
 
+      const effectiveProjectId =
+        exists.project?.shortId || updated.id_dt_project;
+      const taskLinkId = updated.shortId || updated.id;
+      const taskUrl = `/dashboard/project/${effectiveProjectId}?task=${taskLinkId}`;
+
       // 1) Email jika ada user baru yang ditugaskan ke task ini
       if (newlyAssignedNiks.length > 0) {
         const targetNiks = newlyAssignedNiks.filter((n) => n !== actionUser);
@@ -607,7 +676,7 @@ export class ProjectService {
           this.sendTaskAssignedEmailsAsync(
             targetNiks,
             updated.id_dt_project,
-            updated.shortId || updated.id,
+            taskLinkId,
             updated.name,
             actionUser,
             updated.dueDate,
@@ -616,8 +685,55 @@ export class ProjectService {
         }
       }
 
-      // 2) Email milestone jika seluruh task di project telah selesai 100%
+      if (removedAssignedNiks.length > 0) {
+        this.pushService.notifyUsers(
+          removedAssignedNiks,
+          {
+            type: 'task.removed',
+            title: 'Dilepas dari task',
+            body: updated.name,
+            url: taskUrl,
+          },
+          actionUser,
+        );
+      }
+
+      if (dto.dueDate !== undefined) {
+        const prevDue = exists.dueDate?.getTime() ?? null;
+        const nextDue = updated.dueDate?.getTime() ?? null;
+        if (prevDue !== nextDue) {
+          const assigneeNiks = (updated.assignees ?? []).map((a) => a.nik);
+          this.pushService.notifyUsers(
+            assigneeNiks,
+            {
+              type: 'task.due_date_changed',
+              title: 'Tenggat diubah',
+              body: updated.name,
+              url: taskUrl,
+            },
+            actionUser,
+          );
+        }
+      }
+
       if (dto.status === true && exists.status === false) {
+        const completedNiks = Array.from(
+          new Set([
+            ...(updated.assignees ?? []).map((a) => a.nik),
+            exists.createdBy,
+          ].filter(Boolean)),
+        );
+        this.pushService.notifyUsers(
+          completedNiks,
+          {
+            type: 'task.completed',
+            title: 'Task selesai',
+            body: updated.name,
+            url: taskUrl,
+          },
+          actionUser,
+        );
+
         this.checkAndSendProjectCompletedEmailAsync(updated.id_dt_project).catch((err) =>
           this.logger.warn(`Failed checking project completion email: ${err}`),
         );
@@ -634,7 +750,15 @@ export class ProjectService {
     }
     const existingTask = await this.prismaService.dT_TASK.findUnique({
       where: { id: tid },
-      select: { id_dt_project: true, name: true, createdBy: true },
+      select: {
+        id: true,
+        shortId: true,
+        id_dt_project: true,
+        name: true,
+        createdBy: true,
+        project: { select: { shortId: true } },
+        assignees: { select: { nik: true } },
+      },
     });
 
     try {
@@ -724,6 +848,20 @@ export class ProjectService {
           action: 'TASK_DELETED',
           details: { taskName: existingTask.name },
         });
+
+        const effectiveProjectId =
+          existingTask.project?.shortId || existingTask.id_dt_project;
+        const taskLinkId = existingTask.shortId || existingTask.id;
+        this.pushService.notifyUsers(
+          (existingTask.assignees ?? []).map((a) => a.nik),
+          {
+            type: 'task.removed',
+            title: 'Task dihapus',
+            body: existingTask.name,
+            url: `/dashboard/project/${effectiveProjectId}?task=${taskLinkId}`,
+          },
+          nik,
+        );
       }
 
       return `Task ${taskId} deleted`;
@@ -757,7 +895,15 @@ export class ProjectService {
     // pastikan task ada
     const task = await this.prismaService.dT_TASK.findUnique({
       where: { id: tid },
-      select: { id: true, name: true, id_dt_project: true, createdBy: true },
+      select: {
+        id: true,
+        shortId: true,
+        name: true,
+        id_dt_project: true,
+        createdBy: true,
+        project: { select: { shortId: true } },
+        assignees: { select: { nik: true } },
+      },
     });
 
     if (!task) {
@@ -802,6 +948,19 @@ export class ProjectService {
           filenames: attachments.map((f) => (f.originalname || 'file').slice(0, 50)),
         },
       });
+
+      const effectiveProjectId = task.project?.shortId || task.id_dt_project;
+      const taskLinkId = task.shortId || task.id;
+      this.pushService.notifyUsers(
+        (task.assignees ?? []).map((a) => a.nik),
+        {
+          type: 'task.attachment',
+          title: 'Lampiran baru',
+          body: task.name,
+          url: `/dashboard/project/${effectiveProjectId}?task=${taskLinkId}`,
+        },
+        nik,
+      );
     }
 
     return `Uploaded ${uploadedAttachments.length} attachment(s) to task ${taskId}`;
@@ -1318,9 +1477,17 @@ export class ProjectService {
       });
       const userMap = new Map(users.map((u) => [this.normalizeNik(u.nik), u]));
 
+      const projectUrl = `/dashboard/project/${effectiveProjectId}`;
+
       // 1) NEW MEMBERS → "diundang / bergabung"
       for (const m of toCreate) {
         const u = userMap.get(this.normalizeNik(m.nik));
+        this.pushService.notifyUser(m.nik, {
+          type: 'project.member_added',
+          title: 'Ditambahkan ke project',
+          body: projectName,
+          url: projectUrl,
+        });
         if (!u?.email) {
           this.logger.warn(`User ${m.nik} does not have an email in DT_USER. Skipping email.`);
           continue;
@@ -1340,6 +1507,12 @@ export class ProjectService {
       // 2) ROLE CHANGED → "role diubah"
       for (const x of toUpdate) {
         const u = userMap.get(this.normalizeNik(x.newData.nik));
+        this.pushService.notifyUser(x.newData.nik, {
+          type: 'project.role_changed',
+          title: 'Role project diubah',
+          body: projectName,
+          url: projectUrl,
+        });
         if (!u?.email) continue;
 
         this.logger.log(`📧 Sending project role changed email to ${u.email}...`);
@@ -1355,6 +1528,12 @@ export class ProjectService {
       // 3) REMOVED → "akses dicabut"
       for (const nik of toDeleteNik) {
         const u = userMap.get(this.normalizeNik(nik));
+        this.pushService.notifyUser(nik, {
+          type: 'project.access_revoked',
+          title: 'Akses project dicabut',
+          body: projectName,
+          url: '/dashboard',
+        });
         if (!u?.email) continue;
 
         this.logger.log(`📧 Sending project access revoked email to ${u.email}...`);
@@ -1540,7 +1719,7 @@ export class ProjectService {
 
       // Early return di dalam transaksi
       if (!toDelete.length && !toInsert.length) {
-        return { toInsert: 0, toDelete: 0 };
+        return { toInsert: 0, toDelete: 0, insertedNiks: [] as string[], deletedNiks: [] as string[] };
       }
 
       // 4) Delete & Insert
@@ -1562,13 +1741,43 @@ export class ProjectService {
         });
       }
 
-      return { toInsert: toInsert.length, toDelete: toDelete.length, insertedNiks: toInsert };
+      return {
+        toInsert: toInsert.length,
+        toDelete: toDelete.length,
+        insertedNiks: toInsert,
+        deletedNiks: toDelete,
+      };
     });
 
     if (result.insertedNiks && result.insertedNiks.length > 0) {
       this.sendSubTaskAssignedEmailsAsync(subTaskId, result.insertedNiks).catch((err) =>
         this.logger.warn(`Failed sending subtask assigned emails: ${err}`),
       );
+    }
+
+    if (result.deletedNiks?.length) {
+      this.prismaService.dT_SUB_TASK.findUnique({
+        where: { id: subTaskId },
+        include: {
+          task: {
+            select: {
+              shortId: true,
+              id: true,
+              project: { select: { shortId: true, id: true } },
+            },
+          },
+        },
+      }).then((sub) => {
+        if (!sub?.task) return;
+        const effectiveProjectId = sub.task.project?.shortId || sub.task.project?.id;
+        const taskLinkId = sub.task.shortId || sub.task.id;
+        this.pushService.notifyUsers(result.deletedNiks!, {
+          type: 'task.removed',
+          title: 'Dilepas dari subtask',
+          body: sub.name,
+          url: `/dashboard/project/${effectiveProjectId}?task=${taskLinkId}`,
+        });
+      }).catch(() => undefined);
     }
 
     if (result.toInsert === 0 && result.toDelete === 0) {
@@ -2122,6 +2331,7 @@ export class ProjectService {
     const viewSlug = t.view?.shortId || t.view?.id || t.id_dt_view || null;
     return {
       id: taskSlug,
+      guid: t.id,
       shortId: t.shortId ?? null,
       name: t.name,
       desc: t.desc,
@@ -3328,6 +3538,17 @@ export class ProjectService {
       const assignerName = assignerUser?.nama || assignerNik;
       const effectiveProjectId = project?.shortId || projectId;
 
+      const pushType = isSubtask ? 'task.subtask_assigned' : 'task.assigned';
+      const pushTitle = isSubtask ? 'Ditugaskan ke subtask' : 'Ditugaskan ke task';
+      const taskUrl = `/dashboard/project/${effectiveProjectId}?task=${taskId}`;
+
+      this.pushService.notifyUsers(targetNiks, {
+        type: pushType,
+        title: pushTitle,
+        body: taskName,
+        url: taskUrl,
+      });
+
       for (const u of users) {
         if (!u.email) continue;
         if (!this.checkNotificationPref(u.notificationPrefs, 'emailTaskAssigned')) {
@@ -3435,6 +3656,15 @@ export class ProjectService {
                 totalTasks,
               });
             }
+
+            const memberNiks = members.map((m) => m.nik).filter(Boolean);
+            const effectiveProjectId = project.shortId || project.id;
+            this.pushService.notifyUsers(memberNiks, {
+              type: 'project.completed',
+              title: 'Project selesai',
+              body: project.name,
+              url: `/dashboard/project/${effectiveProjectId}`,
+            });
           }
         }
       }

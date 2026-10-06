@@ -7,7 +7,7 @@ import {
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { comparePassword, encodePassword } from '../utils/bcrypt';
 import { LoginRequest } from './dto/request/loginRequest';
@@ -19,6 +19,7 @@ import { MailService } from '../utils/mail/mail.service';
 import { SuspendedUserException } from '../utils/suspendExecption';
 import { GetInfoUserResponse } from './dto/response/getInfoResponse';
 import { ConfigService } from '@nestjs/config';
+import { PushService } from '../notifications/push.service';
 
 export interface JwtPayload {
   nik: string;
@@ -36,7 +37,7 @@ export interface RefreshTokenPayload {
 }
 
 export interface IAuthService {
-  validateUser(data: LoginRequest): Promise<LoginResponse>;
+  validateUser(data: LoginRequest, userAgent?: string): Promise<LoginResponse>;
   refreshToken(refreshToken: string): Promise<LoginResponse>;
   revokeToken(refreshToken: string): Promise<void>;
   sendForgotPw(data: ForgotPwRequest): Promise<string>;
@@ -52,6 +53,7 @@ export class AuthService implements IAuthService {
     private jwtService: JwtService,
     private mailService: MailService,
     private configService: ConfigService,
+    private pushService: PushService,
   ) {}
 
   private getAccessSecret(): string {
@@ -103,10 +105,24 @@ export class AuthService implements IAuthService {
       roleId: string;
     },
     familyId?: string,
+    loginMeta?: { userAgent?: string },
   ): Promise<LoginResponse> {
     const family = familyId || randomUUID();
     const jti = randomUUID();
     const expiresAt = new Date(Date.now() + this.getRefreshExpiresInMs());
+
+    const userAgent = loginMeta?.userAgent?.slice(0, 500) ?? null;
+    const deviceHash = userAgent
+      ? createHash('sha256').update(userAgent).digest('hex')
+      : null;
+
+    let isNewDevice = false;
+    if (deviceHash) {
+      const seen = await this.prismaService.lOG_REFRESH_TOKEN.count({
+        where: { nik: user.nik, deviceHash },
+      });
+      isNewDevice = seen === 0;
+    }
 
     // Save refresh token record in DB
     await this.prismaService.lOG_REFRESH_TOKEN.create({
@@ -116,8 +132,19 @@ export class AuthService implements IAuthService {
         family: family,
         isRevoked: false,
         expiresAt: expiresAt,
+        userAgent,
+        deviceHash,
       },
     });
+
+    if (isNewDevice && deviceHash) {
+      this.pushService.notifyUser(user.nik, {
+        type: 'account.new_device_login',
+        title: 'Login perangkat baru',
+        body: 'Akun Anda login dari perangkat baru.',
+        url: '/dashboard',
+      });
+    }
 
     const accessPayload: JwtPayload = {
       nik: user.nik,
@@ -150,7 +177,7 @@ export class AuthService implements IAuthService {
     return { token, refreshToken };
   }
 
-  async validateUser(data: LoginRequest): Promise<LoginResponse> {
+  async validateUser(data: LoginRequest, userAgent?: string): Promise<LoginResponse> {
     const user = await this.prismaService.dT_USER.findUnique({
       where: { nik: data.nik },
     });
@@ -164,11 +191,15 @@ export class AuthService implements IAuthService {
     }
 
     // New login generates brand new family
-    return this.generateTokens({
-      nik: user.nik,
-      nama: user.nama,
-      roleId: user.roleId,
-    });
+    return this.generateTokens(
+      {
+        nik: user.nik,
+        nama: user.nama,
+        roleId: user.roleId,
+      },
+      undefined,
+      { userAgent },
+    );
   }
 
   async refreshToken(refreshToken: string): Promise<LoginResponse> {
@@ -416,6 +447,12 @@ export class AuthService implements IAuthService {
     if (updatedUser?.email) {
       this.mailService.sendPasswordChangedEmail(updatedUser.email, updatedUser.nama);
     }
+    this.pushService.notifyUser(whorequest.nik, {
+      type: 'account.password_changed',
+      title: 'Password diubah',
+      body: 'Password akun Anda berhasil diubah.',
+      url: '/dashboard',
+    });
 
     return 'Change Password Successfully';
   }

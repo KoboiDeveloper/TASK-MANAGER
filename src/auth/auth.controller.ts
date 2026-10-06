@@ -64,9 +64,17 @@ export class AuthController {
 
   @Post('login')
   @HttpCode(HttpStatus.OK)
-  async login(@Body() request: LoginRequest, @Res({ passthrough: true }) res: Response) {
+  async login(
+    @Body() request: LoginRequest,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
     try {
-      const result: LoginResponse = await this.authService.validateUser(request);
+      const ua = req.headers['user-agent'];
+      const result: LoginResponse = await this.authService.validateUser(
+        request,
+        typeof ua === 'string' ? ua : undefined,
+      );
       this.setAuthCookies(res, result);
 
       return new CommonResponse('Login Successful', HttpStatus.OK, result);

@@ -10,6 +10,7 @@ import { ResponseTicketCommand } from './dto/response/responseTicketCommand';
 import { TicketListResponseDto, UserTicketSummaryDto } from './dto/response/responseTIcket.dto';
 import { UserService } from '../user/user.service';
 import { DropboxStorageService } from '../storage/dropbox.storage.service';
+import { PushService } from '../notifications/push.service';
 
 @Injectable()
 export class TicketService {
@@ -18,7 +19,25 @@ export class TicketService {
     private readonly prismaService: PrismaService,
     private readonly userService: UserService,
     private readonly storageService: DropboxStorageService,
+    private readonly pushService: PushService,
   ) {}
+
+  private pushTicketToHandler(
+    handlerNik: string,
+    ticketId: string,
+    type: string,
+    title: string,
+    body: string,
+  ): void {
+    this.pushService.notifyUser(handlerNik, {
+      type,
+      title,
+      body,
+      url: '/dashboard/tickets',
+      tag: `ticket-${ticketId}`,
+      data: { ticketId },
+    });
+  }
 
   private async pickNextAdminNik(category: string): Promise<string> {
     let users: Array<{ nik: string }> = [];
@@ -250,6 +269,7 @@ export class TicketService {
       });
 
       this.logger.log(`Ticket ${id} created successfully with ${uploadedImages.length} image(s)`);
+      this.pushTicketToHandler(handlerNik, id, 'ticket.assigned', 'Ticket baru', id);
       return id;
     } catch (e) {
       // ⚠️ ROLLBACK: Hapus semua images dari Dropbox jika DB save gagal
@@ -416,6 +436,7 @@ export class TicketService {
       },
     });
 
+    this.pushTicketToHandler(nik, ticketId, 'ticket.reassigned', 'Ticket dialihkan', ticketId);
     return 'Ticket successfully reassigned';
   }
 
@@ -532,13 +553,21 @@ export class TicketService {
   }
 
   async repairtPayment(data: RequestRepairTransactionDto): Promise<string> {
-    await this.prismaService.dT_TICKET.update({
+    const ticket = await this.prismaService.dT_TICKET.update({
       where: { id: data.ticketId },
       data: {
         status: EStatus.ONPROCESS,
       },
+      select: { handlerNik: true },
     });
 
+    this.pushTicketToHandler(
+      ticket.handlerNik,
+      data.ticketId,
+      'ticket.on_process',
+      'Ticket diproses',
+      data.ticketId,
+    );
     return 'repair payment request processed';
   }
   //by listener
@@ -555,6 +584,29 @@ export class TicketService {
     });
 
     this.logger.log(`✅ Ticket ${data.ticketId} updated to ${data.status}`);
+
+    const handlerNik = ticket.handlerNik;
+    const tid = data.ticketId;
+    switch (data.status) {
+      case EStatus.ONPROCESS:
+        this.pushTicketToHandler(handlerNik, tid, 'ticket.on_process', 'Ticket diproses', tid);
+        break;
+      case EStatus.COMPLETED:
+        this.pushTicketToHandler(handlerNik, tid, 'ticket.completed', 'Ticket selesai', tid);
+        break;
+      case EStatus.PENDING:
+        this.pushTicketToHandler(handlerNik, tid, 'ticket.pending', 'Ticket ditunda', tid);
+        break;
+      case EStatus.CANCELLED:
+        this.pushTicketToHandler(handlerNik, tid, 'ticket.cancelled', 'Ticket dibatalkan', tid);
+        break;
+      case EStatus.FAILED:
+        this.pushTicketToHandler(handlerNik, tid, 'ticket.failed', 'Ticket gagal', tid);
+        break;
+      default:
+        break;
+    }
+
     return ticket;
   }
 
@@ -595,7 +647,7 @@ export class TicketService {
     //   if (!ok) blobFailed++;
     // }
 
-    // 5) Return hasil
+    this.pushTicketToHandler(ticket.handlerNik, ticketId, 'ticket.completed', 'Ticket selesai', ticketId);
     return `Ticket ${ticketId} completed.`;
   }
 
@@ -608,13 +660,21 @@ export class TicketService {
     if (!ticket) throw new NotFoundException('Ticket tidak ditemukan');
 
     // Update status tiket jadi PENDING
-    await this.prismaService.dT_TICKET.update({
+    const updated = await this.prismaService.dT_TICKET.update({
       where: { id: ticketId },
       data: {
         status: EStatus.PENDING,
         reason: reason,
       },
+      select: { handlerNik: true },
     });
+    this.pushTicketToHandler(
+      updated.handlerNik,
+      ticketId,
+      'ticket.pending',
+      'Ticket ditunda',
+      ticketId,
+    );
     return `Ticket ${ticketId} berhasil di-hold`;
   }
 
@@ -625,13 +685,21 @@ export class TicketService {
 
     if (!ticket) throw new NotFoundException('Ticket tidak ditemukan');
 
-    await this.prismaService.dT_TICKET.update({
+    const updated = await this.prismaService.dT_TICKET.update({
       where: { id: ticketId },
       data: {
         status: EStatus.CANCELLED,
         reason: reason,
       },
+      select: { handlerNik: true },
     });
+    this.pushTicketToHandler(
+      updated.handlerNik,
+      ticketId,
+      'ticket.cancelled',
+      'Ticket dibatalkan',
+      ticketId,
+    );
     return `Ticket ${ticketId} berhasil dibatalkan`;
   }
 }

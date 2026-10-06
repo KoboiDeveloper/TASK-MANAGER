@@ -5,6 +5,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { DT_IMAGES } from '@prisma/client';
 import { DropboxStorageService } from '../../storage/dropbox.storage.service';
 import { MailService } from '../mail/mail.service';
+import { PushService } from '../../notifications/push.service';
 
 type ImageRow = Pick<DT_IMAGES, 'id' | 'url' | 'createdAt'>;
 
@@ -68,6 +69,7 @@ export class CronjobService {
     private readonly prisma: PrismaService,
     private readonly storageService: DropboxStorageService,
     private readonly mailService: MailService,
+    private readonly pushService: PushService,
   ) {}
 
   /** ⏱ TEST: tanggal 29 jam 16:49 WIB (ganti ke '0 0 0 29 * *' untuk produksi) */
@@ -169,6 +171,8 @@ export class CronjobService {
 
     const todayStartUtc = new Date(Date.UTC(y, m, d, 0, 0, 0, 0) - WIB_OFFSET_MS);
     const todayEndUtc = new Date(Date.UTC(y, m, d, 23, 59, 59, 999) - WIB_OFFSET_MS);
+    const tomorrowStartUtc = new Date(Date.UTC(y, m, d + 1, 0, 0, 0, 0) - WIB_OFFSET_MS);
+    const tomorrowEndUtc = new Date(Date.UTC(y, m, d + 1, 23, 59, 59, 999) - WIB_OFFSET_MS);
 
     // Ambil semua task belum selesai dari project aktif yang memiliki deadline
     const tasks = await this.prisma.dT_TASK.findMany({
@@ -205,7 +209,7 @@ export class CronjobService {
       },
     });
 
-    // Peta user ke task overdue dan dueToday
+    // Peta user ke task overdue, dueToday, dueTomorrow
     type UserTaskItem = {
       id: string;
       name: string;
@@ -221,6 +225,7 @@ export class CronjobService {
         user: { nik: string; nama: string; email: string };
         overdue: Array<UserTaskItem & { daysOverdue: number }>;
         dueToday: Array<UserTaskItem>;
+        dueTomorrow: Array<UserTaskItem>;
       }
     >();
 
@@ -229,8 +234,10 @@ export class CronjobService {
 
       const isOverdue = t.dueDate < todayStartUtc;
       const isDueToday = t.dueDate >= todayStartUtc && t.dueDate <= todayEndUtc;
+      const isDueTomorrow =
+        t.dueDate >= tomorrowStartUtc && t.dueDate <= tomorrowEndUtc;
 
-      if (!isOverdue && !isDueToday) continue;
+      if (!isOverdue && !isDueToday && !isDueTomorrow) continue;
 
       const daysOverdue = isOverdue
         ? Math.max(
@@ -244,24 +251,19 @@ export class CronjobService {
       const taskId = t.shortId || t.id;
 
       for (const a of t.assignees) {
-        if (!a.user || !a.user.email) continue;
+        if (!a.user?.nik) continue;
         const nik = a.user.nik;
-
-        // Cek preferensi email ringkasan harian
-        if (a.user.notificationPrefs) {
-          try {
-            const prefs = JSON.parse(a.user.notificationPrefs);
-            if (prefs.emailDailyDigest === false) continue;
-          } catch {
-            // fallback default ON
-          }
-        }
 
         if (!userDigestMap.has(nik)) {
           userDigestMap.set(nik, {
-            user: { nik, nama: a.user.nama, email: a.user.email },
+            user: {
+              nik,
+              nama: a.user.nama,
+              email: a.user.email || '',
+            },
             overdue: [],
             dueToday: [],
+            dueTomorrow: [],
           });
         }
 
@@ -283,6 +285,14 @@ export class CronjobService {
             projectName,
             dueDate: t.dueDate,
           });
+        } else if (isDueTomorrow) {
+          entry.dueTomorrow.push({
+            id: taskId,
+            name: t.name,
+            projectId,
+            projectName,
+            dueDate: t.dueDate,
+          });
         }
       }
     }
@@ -291,27 +301,78 @@ export class CronjobService {
     const usersProcessed = userDigestMap.size;
 
     for (const [nik, data] of userDigestMap.entries()) {
+      const emailDigestAllowed = (() => {
+        if (!data.user.email) return false;
+        if (!data.user.notificationPrefs) return true;
+        try {
+          const prefs = JSON.parse(data.user.notificationPrefs);
+          return prefs.emailDailyDigest !== false;
+        } catch {
+          return true;
+        }
+      })();
+
       try {
-        // Hitung total active task yang diemban user
-        const totalActiveTasks = await this.prisma.dT_ASSIGNEE_TASK.count({
-          where: {
-            nik,
-            task: {
-              status: false,
-              project: { isArchive: false },
+        if (emailDigestAllowed) {
+          const totalActiveTasks = await this.prisma.dT_ASSIGNEE_TASK.count({
+            where: {
+              nik,
+              task: {
+                status: false,
+                project: { isArchive: false },
+              },
             },
-          },
-        });
+          });
 
-        await this.mailService.sendDailyDigestEmail({
-          to: data.user.email,
-          userName: data.user.nama,
-          dueToday: data.dueToday,
-          overdue: data.overdue,
-          totalActiveTasks,
-        });
+          await this.mailService.sendDailyDigestEmail({
+            to: data.user.email,
+            userName: data.user.nama,
+            dueToday: data.dueToday,
+            overdue: data.overdue,
+            totalActiveTasks,
+          });
 
-        emailsSent++;
+          emailsSent++;
+        }
+
+        if (data.overdue.length > 0) {
+          const n = data.overdue.length;
+          this.pushService.notifyUser(nik, {
+            type: 'task.overdue',
+            title: 'Task terlambat',
+            body: n === 1 ? data.overdue[0].name : `${n} task terlambat`,
+            url: '/dashboard',
+          });
+        }
+
+        if (data.dueToday.length > 0) {
+          const n = data.dueToday.length;
+          this.pushService.notifyUser(nik, {
+            type: 'task.due_today',
+            title: 'Jatuh tempo hari ini',
+            body: n === 1 ? data.dueToday[0].name : `${n} task jatuh tempo hari ini`,
+            url: '/dashboard',
+          });
+        }
+
+        if (data.dueTomorrow.length > 0) {
+          const n = data.dueTomorrow.length;
+          this.pushService.notifyUser(nik, {
+            type: 'task.due_tomorrow',
+            title: 'Jatuh tempo besok',
+            body: n === 1 ? data.dueTomorrow[0].name : `${n} task jatuh tempo besok`,
+            url: '/dashboard',
+          });
+        }
+
+        if (data.overdue.length > 0 || data.dueToday.length > 0) {
+          this.pushService.notifyUser(nik, {
+            type: 'digest.morning',
+            title: 'Briefing pagi',
+            body: `${data.dueToday.length} hari ini, ${data.overdue.length} terlambat`,
+            url: '/dashboard',
+          });
+        }
       } catch (err) {
         this.logger.error(
           `Failed sending daily digest to ${data.user.email} (${nik}):`,

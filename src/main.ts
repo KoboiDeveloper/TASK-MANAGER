@@ -7,6 +7,16 @@ import * as process from 'node:process';
 import { Logger } from '@nestjs/common';
 import { json, urlencoded } from 'express';
 import { isOriginAllowed } from './common/corsOrigins';
+import { readFileSync, existsSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+// Cursor shell sering inject PORT=5000; paksa baca PORT dari .env project
+(() => {
+  const envPath = resolve(process.cwd(), '.env');
+  if (!existsSync(envPath)) return;
+  const match = readFileSync(envPath, 'utf8').match(/^\s*PORT\s*=\s*"?([^"\r\n#]+)"?/m);
+  if (match?.[1]) process.env.PORT = match[1].trim();
+})();
 
 const logger = new Logger('Bootstrap');
 async function bootstrap(): Promise<void> {
@@ -38,7 +48,7 @@ async function bootstrap(): Promise<void> {
     }),
   );
 
-  const port = process.env.PORT || 5000;
+  const port = Number(process.env.PORT) || 1000;
   await app.listen(port, '0.0.0.0');
 
   // HTTP Server

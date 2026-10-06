@@ -18,6 +18,7 @@ import { DropboxStorageService } from '../storage/dropbox.storage.service';
 import { assertImageFile, getOriginalName, safeUserPhotoPath } from '../utils/file';
 import { generateColorFromString } from '../utils/color';
 import { MailService } from '../utils/mail/mail.service';
+import { PushService } from '../notifications/push.service';
 
 interface IuserService {
   create(data: RegisterRequest, file?: Express.Multer.File): Promise<RegisterResponse>;
@@ -54,6 +55,7 @@ export class UserService implements IuserService {
     private readonly configService: ConfigService,
     private readonly storageService: DropboxStorageService,
     private readonly mailService: MailService,
+    private readonly pushService: PushService,
   ) {}
 
   async findAll(): Promise<ResponseListUsersDto[]> {
@@ -266,6 +268,9 @@ export class UserService implements IuserService {
 
     const deptUpdate = data.departement !== undefined ? data.departement : data.departemen;
 
+    const roleChanged = existingUser.roleId !== getRole.id;
+    const deactivated = existingUser.statusActive && !data.statusActive;
+
     await this.prismaService.$transaction(async (tx) => {
       // update data user dasar
       await tx.dT_USER.update({
@@ -285,6 +290,23 @@ export class UserService implements IuserService {
         },
       });
     });
+
+    if (deactivated) {
+      this.pushService.notifyUser(nik, {
+        type: 'account.deactivated',
+        title: 'Akun dinonaktifkan',
+        body: 'Akun Anda telah dinonaktifkan.',
+        url: '/login',
+      });
+    }
+    if (roleChanged) {
+      this.pushService.notifyUser(nik, {
+        type: 'account.role_changed',
+        title: 'Role diubah',
+        body: `Role sistem: ${getRole.id}`,
+        url: '/dashboard',
+      });
+    }
   }
 
   private async processPhotoValue(
@@ -367,6 +389,12 @@ export class UserService implements IuserService {
     const password = encodePassword(defaultPassword);
 
     await this.prismaService.dT_USER.update({ where: { nik }, data: { password } });
+    this.pushService.notifyUser(nik, {
+      type: 'account.password_changed',
+      title: 'Password diubah',
+      body: 'Password akun Anda berhasil diubah.',
+      url: '/dashboard',
+    });
   }
 
   async changePassword(nik: string, currentPassword: string, newPassword: string): Promise<void> {
@@ -417,6 +445,12 @@ export class UserService implements IuserService {
     if (user.email) {
       this.mailService.sendPasswordChangedEmail(user.email, user.nama);
     }
+    this.pushService.notifyUser(nik, {
+      type: 'account.password_changed',
+      title: 'Password diubah',
+      body: 'Password akun Anda berhasil diubah.',
+      url: '/dashboard',
+    });
   }
 
   async findOne(nik: string): Promise<DT_USER> {

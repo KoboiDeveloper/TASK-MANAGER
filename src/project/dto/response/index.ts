@@ -76,6 +76,8 @@ export type AttachmentTask = {
 
 export type TaskNonSection = {
   id: string;
+  /** UUID asli (untuk match chat TaskRef.guid) */
+  guid?: string;
   shortId?: string | null;
   name: string;
   desc: string | null;
@@ -104,14 +106,20 @@ export type TaskSectionResponse = {
 
 export type ownTaskResponse = {
   id: string;
+  guid?: string;
   shortId?: string | null;
   name: string;
   status: boolean;
   dueDate: Date | null;
+  createdBy?: string | null;
+  assignees?: { nik: string }[];
   project: {
     id: string;
+    guid?: string;
     shortId?: string | null;
     name: string;
     color: string | null;
+    /** NIK owner + anggota project (untuk filter sisipkan task di chat) */
+    memberNiks?: string[];
   };
 };

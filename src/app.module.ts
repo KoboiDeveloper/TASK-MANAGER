@@ -11,6 +11,8 @@ import { TicketModule } from './ticket/ticket.module';
 import { ProjectModule } from './project/project.module';
 import { CronjobModule } from './utils/cronjob/cronjob.module';
 import { ScheduleModule } from '@nestjs/schedule';
+import { ChatModule } from './chat/chat.module';
+import { NotificationsModule } from './notifications/notifications.module';
 @Module({
   imports: [
     ConfigModule.forRoot({
@@ -25,7 +27,9 @@ import { ScheduleModule } from '@nestjs/schedule';
     RoleModule,
     TicketModule,
     ProjectModule,
+    ChatModule,
     CronjobModule,
+    NotificationsModule,
   ],
   controllers: [AppController],
   providers: [AppService],
