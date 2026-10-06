@@ -17,6 +17,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { isOriginAllowed } from '../common/corsOrigins';
 import { ChatEvents } from './chat.events';
 import { SendMessageDto } from './dto/chat.dto';
+import { listOnlineNiks, trackOffline, trackOnline } from './chat.presence';
 
 interface SocketUser {
   nik: string;
@@ -43,6 +44,8 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
   server!: Server;
 
   private readonly logger = new Logger(ChatGateway.name);
+  /** nik → active socket ids (multi-tab safe) */
+  private readonly onlineByNik = new Map<string, Set<string>>();
 
   constructor(
     private readonly jwtService: JwtService,
@@ -91,7 +94,7 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
       });
       if (!userInDb?.statusActive) return null;
       const user: SocketUser = {
-        nik: payload.nik,
+        nik: String(payload.nik).trim(),
         nama: userInDb.nama || payload.nama,
         roleId: payload.roleId,
       };
@@ -118,11 +121,22 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
       }
       await client.join(`user:${user.nik}`);
       this.logger.log(`Chat WS connected: ${client.id} - ${user.nama} (${user.nik})`);
-      this.server.emit('presence:update', {
-        nik: user.nik,
-        isOnline: true,
-        lastSeenAt: new Date().toISOString(),
-      });
+
+      // Snapshot: tell the new client who is already online
+      const now = new Date().toISOString();
+      for (const nik of listOnlineNiks(this.onlineByNik)) {
+        if (nik === user.nik) continue;
+        client.emit('presence:update', { nik, isOnline: true, lastSeenAt: now });
+      }
+
+      const { becameOnline } = trackOnline(this.onlineByNik, user.nik, client.id);
+      if (becameOnline) {
+        this.server.emit('presence:update', {
+          nik: user.nik,
+          isOnline: true,
+          lastSeenAt: now,
+        });
+      }
     } catch (error) {
       this.logger.error(`Chat WS auth error: ${(error as Error).message}`);
       client.disconnect(true);
@@ -132,11 +146,14 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
   handleDisconnect(client: Socket) {
     const user = client.data?.user as SocketUser | undefined;
     if (user?.nik) {
-      this.server.emit('presence:update', {
-        nik: user.nik,
-        isOnline: false,
-        lastSeenAt: new Date().toISOString(),
-      });
+      const { becameOffline } = trackOffline(this.onlineByNik, user.nik, client.id);
+      if (becameOffline) {
+        this.server.emit('presence:update', {
+          nik: user.nik,
+          isOnline: false,
+          lastSeenAt: new Date().toISOString(),
+        });
+      }
     }
     this.logger.log(`Chat WS disconnected: ${client.id}`);
   }
