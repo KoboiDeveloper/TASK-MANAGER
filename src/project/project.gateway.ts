@@ -12,6 +12,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
+import { isOriginAllowed } from '../common/corsOrigins';
 
 interface SocketUser {
   nik: string;
@@ -24,18 +25,9 @@ interface SocketUser {
   namespace: '/project',
   cors: {
     origin: (origin, callback) => {
-      if (!origin) return callback(null, true);
-
-      const allowed = [
-        'https://task-manager-fe-lyart.vercel.app',
-        'http://localhost:3000',
-        process.env.FRONTEND_URL,
-      ].filter(Boolean) as string[];
-
-      if (allowed.includes(origin) || origin.endsWith('.vercel.app')) {
+      if (isOriginAllowed(origin)) {
         return callback(null, true);
       }
-
       callback(new Error(`Origin ${origin} not allowed by CORS`));
     },
     credentials: true,
