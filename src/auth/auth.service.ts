@@ -412,6 +412,11 @@ export class AuthService implements IAuthService {
       this.prismaService.lOG_FORGOT_PASSWORD.update({ where: { otp }, data: { used: true } }),
     ]);
 
+    const updatedUser = await this.prismaService.dT_USER.findUnique({ where: { nik: whorequest.nik } });
+    if (updatedUser?.email) {
+      this.mailService.sendPasswordChangedEmail(updatedUser.email, updatedUser.nama);
+    }
+
     return 'Change Password Successfully';
   }
 

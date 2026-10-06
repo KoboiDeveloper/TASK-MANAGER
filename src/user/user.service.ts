@@ -17,6 +17,7 @@ import { EmpHRIS, ResponseListUsersDto, ResponseUserContains } from './dto/respo
 import { DropboxStorageService } from '../storage/dropbox.storage.service';
 import { assertImageFile, getOriginalName, safeUserPhotoPath } from '../utils/file';
 import { generateColorFromString } from '../utils/color';
+import { MailService } from '../utils/mail/mail.service';
 
 interface IuserService {
   create(data: RegisterRequest, file?: Express.Multer.File): Promise<RegisterResponse>;
@@ -52,6 +53,7 @@ export class UserService implements IuserService {
     private readonly roleService: RoleService,
     private readonly configService: ConfigService,
     private readonly storageService: DropboxStorageService,
+    private readonly mailService: MailService,
   ) {}
 
   async findAll(): Promise<ResponseListUsersDto[]> {
@@ -379,12 +381,42 @@ export class UserService implements IuserService {
       throw new BadRequestException('Old password is incorrect');
     }
 
+    if (currentPassword === newPassword) {
+      throw new BadRequestException('Password baru tidak boleh sama dengan password lama');
+    }
+
+    if (newPassword.length < 8) {
+      throw new BadRequestException('Password baru minimal 8 karakter');
+    }
+
+    if (!/[A-Z]/.test(newPassword)) {
+      throw new BadRequestException('Password baru harus mengandung setidaknya 1 huruf besar');
+    }
+
+    if (!/[0-9]/.test(newPassword)) {
+      throw new BadRequestException('Password baru harus mengandung setidaknya 1 angka');
+    }
+
+    if (!/[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(newPassword)) {
+      throw new BadRequestException('Password baru harus mengandung setidaknya 1 simbol atau karakter khusus (misal: _, @, #)');
+    }
+
     const password = encodePassword(newPassword);
 
-    await this.prismaService.dT_USER.update({
-      where: { nik },
-      data: { password },
-    });
+    await this.prismaService.$transaction([
+      this.prismaService.dT_USER.update({
+        where: { nik },
+        data: { password },
+      }),
+      this.prismaService.lOG_REFRESH_TOKEN.updateMany({
+        where: { nik },
+        data: { isRevoked: true },
+      }),
+    ]);
+
+    if (user.email) {
+      this.mailService.sendPasswordChangedEmail(user.email, user.nama);
+    }
   }
 
   async findOne(nik: string): Promise<DT_USER> {

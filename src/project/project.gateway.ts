@@ -57,7 +57,7 @@ export class ProjectGateway implements OnGatewayConnection, OnGatewayDisconnect 
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
     private readonly prismaService: PrismaService,
-  ) {}
+  ) { }
 
   // =========================================================
   // 🔹 CONNECTION & AUTHENTICATION

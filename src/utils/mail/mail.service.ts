@@ -180,6 +180,66 @@ export class MailService implements OnModuleInit {
   }
 
   // =========================================================
+  // 🔹 PASSWORD CHANGED NOTIFICATION
+  // =========================================================
+
+  /** Kirim email notifikasi bahwa kata sandi telah berhasil diubah */
+  async sendPasswordChangedEmail(to: string, userName?: string): Promise<void> {
+    const recipients = this.normalizeRecipients(to);
+    if (!recipients.length) return;
+
+    const name = userName ? this.esc(userName) : 'Pengguna';
+    const loginUrl = `${this.domain || 'https://workspace.amscorp.id'}/login`;
+    const changeTime = this.formatDateIndo(new Date());
+
+    const htmlContent = `
+  <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden;">
+    <div style="background-color: #4f46e5; padding: 20px; color: white;">
+      <h2 style="margin: 0;">🛡️ Keamanan Akun: Kata Sandi Diperbarui</h2>
+    </div>
+    <div style="padding: 24px; color: #333; line-height: 1.6;">
+      <p style="font-size: 15px;">Halo <strong>${name}</strong>,</p>
+      <p>Kata sandi untuk akun <strong>Task Manager</strong> Anda telah berhasil diperbarui pada <strong>${changeTime} WIB</strong>.</p>
+
+      <div style="background-color: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 6px; padding: 14px 16px; margin: 18px 0; color: #166534; font-size: 14px;">
+        ✅ <strong>Kata sandi Anda telah berhasil diganti.</strong> Anda dapat masuk kembali ke dashboard menggunakan kata sandi baru.
+      </div>
+
+      <div style="text-align: center; margin: 24px 0;">
+        <a href="${loginUrl}" style="background-color: #4f46e5; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">
+          Masuk ke Akun
+        </a>
+      </div>
+
+      <div style="border-top: 1px solid #eee; margin-top: 20px; padding-top: 16px;">
+        <p style="font-size: 13px; color: #b91c1c; margin: 0 0 4px 0; font-weight: bold;">
+          ⚠️ Bukan Anda yang melakukan perubahan ini?
+        </p>
+        <p style="font-size: 12px; color: #666; margin: 0;">
+          Jika Anda tidak pernah meminta perubahan kata sandi, akun Anda mungkin telah disusupi. Segera atur ulang kata sandi Anda melalui menu <em>Lupa Kata Sandi</em> pada halaman login atau hubungi tim IT Administrator.
+        </p>
+      </div>
+    </div>
+    <div style="background-color: #f9f9f9; padding: 16px; font-size: 12px; color: #777; text-align: center; border-top: 1px solid #eee;">
+      &copy; ${new Date().getFullYear()} Task Manager App. All rights reserved.
+    </div>
+  </div>
+  `;
+
+    try {
+      await this.mailer.sendMail({
+        from: `"${this.fromName}" <${this.fromEmail}>`,
+        to: recipients,
+        subject: 'Keamanan Akun: Kata Sandi Anda Telah Diperbarui',
+        html: htmlContent,
+      });
+    } catch (e) {
+      // jangan block flow utama
+      this.logger.warn(`sendPasswordChangedEmail failed: ${e}`);
+    }
+  }
+
+  // =========================================================
   // 🔹 PROJECT: JOINED
   // =========================================================
 

@@ -208,13 +208,16 @@ export class UserController {
     try {
       await this.userService.changePassword(nik, data.currentPassword, data.newPassword);
 
-      // clear cookie
-      res.clearCookie('access_token', {
+      // clear cookies
+      const isProd = process.env.NODE_ENV === 'production';
+      const clearOpts = {
         path: '/',
         httpOnly: true,
-        secure: process.env.NODE_ENV === 'production', // true di production
-        sameSite: 'lax',
-      });
+        secure: isProd,
+        sameSite: 'lax' as const,
+      };
+      res.clearCookie('access_token', clearOpts);
+      res.clearCookie('refresh_token', clearOpts);
 
       return new CommonResponse('Password changed successfully', HttpStatus.OK, null);
     } catch (e) {
