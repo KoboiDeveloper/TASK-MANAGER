@@ -692,14 +692,14 @@ export class ChatService {
     const payload = { ...mapped, clientId: dto.clientId };
     this.gateway.emitToRoom(roomId, 'message:new', payload);
 
-    // notify members of room list update (unread)
+    // notify ALL members (incl. sender) so sidebar preview updates in realtime.
+    // unreadCount already incremented in DB for non-senders above.
     const members = await this.prisma.dT_CHAT_MEMBER.findMany({ where: { roomId } });
     for (const m of members) {
-      if (m.nik.trim() === nik) continue;
       this.gateway.emitToUser(m.nik.trim(), 'room:updated', {
         id: roomId,
         lastMessageAt: mapped.createdAt,
-        unreadCount: m.unreadCount + 1,
+        unreadCount: m.unreadCount,
         lastMessage: mapped,
       });
     }
