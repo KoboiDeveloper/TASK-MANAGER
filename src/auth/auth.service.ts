@@ -25,7 +25,7 @@ export interface JwtPayload {
   nik: string;
   nama: string;
   roleId: string;
-  type?: 'access';
+  type?: 'access' | 'ws';
 }
 
 export interface RefreshTokenPayload {
@@ -76,6 +76,29 @@ export class AuthService implements IAuthService {
 
   private getRefreshExpiresIn(): string {
     return this.configService.get<string>('REFRESH_TOKEN_EXPIRES') || '7d';
+  }
+
+  private getWsTicketExpiresIn(): string {
+    return this.configService.get<string>('WS_TICKET_EXPIRES') || '5m';
+  }
+
+  /**
+   * Short-lived JWT for Socket.IO handshake.
+   * FE fetches this via same-origin /api proxy (httpOnly cookie works),
+   * then passes it in socket auth — cookies cannot cross FE↔BE hosts.
+   */
+  async issueWsTicket(user: { nik: string; nama: string; roleId: string }): Promise<string> {
+    const payload: JwtPayload = {
+      nik: user.nik,
+      nama: user.nama,
+      roleId: user.roleId,
+      type: 'ws',
+    };
+    return this.jwtService.signAsync(payload, {
+      secret: this.getAccessSecret(),
+      expiresIn: this.getWsTicketExpiresIn() as any,
+      issuer: this.getIssuer(),
+    });
   }
 
   private getRefreshExpiresInMs(): number {

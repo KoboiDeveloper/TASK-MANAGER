@@ -160,6 +160,25 @@ export class AuthController {
     return new CommonResponse('Welcome', HttpStatus.OK, userInfo);
   }
 
+  /**
+   * Issue a short-lived token for Socket.IO auth.
+   * Called same-origin via Next rewrite so httpOnly access_token cookie is sent.
+   */
+  @UseGuards(AuthGuard)
+  @Get('ws-ticket')
+  async getWsTicket(@Req() request: Request) {
+    const user = request['user'] as { nik: string; nama: string; roleId: string };
+    const token = await this.authService.issueWsTicket({
+      nik: user.nik,
+      nama: user.nama,
+      roleId: user.roleId,
+    });
+    return new CommonResponse('WS ticket issued', HttpStatus.OK, {
+      token,
+      expiresIn: 300,
+    });
+  }
+
   @Post('forgot-password')
   async sendOtpResetPw(@Body() request: ForgotPwRequest) {
     try {

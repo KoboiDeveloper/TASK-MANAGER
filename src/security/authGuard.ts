@@ -40,7 +40,9 @@ export class AuthGuard implements CanActivate {
         secret: this.mustGetEnv('SECRET_KEY'),
         issuer: this.mustGetEnv('ISSUER_STAMP'),
       });
-      if ((request.user as any)?.type === 'refresh') {
+      const tokenType = (request.user as any)?.type;
+      // refresh + ws tickets are not valid for HTTP API auth
+      if (tokenType === 'refresh' || tokenType === 'ws') {
         throw new UnauthorizedException('Invalid token type');
       }
     } catch (error) {
