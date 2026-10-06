@@ -96,13 +96,16 @@ export class PushService implements OnModuleInit {
     const subs = await this.prisma.dT_PUSH_SUBSCRIPTION.findMany({ where: { nik } });
     if (!subs.length) return;
 
+    const url = payload.url || '/dashboard';
     const body = JSON.stringify({
       title: payload.title,
       body: payload.body,
-      url: payload.url || '/dashboard',
+      url,
       tag: payload.tag || payload.type,
-      data: { type: payload.type, ...(payload.data || {}) },
+      data: { type: payload.type, url, ...(payload.data || {}) },
     });
+
+    const urgency = payload.type.startsWith('chat.') ? 'high' : 'normal';
 
     await Promise.all(
       subs.map(async (sub) => {
@@ -113,14 +116,15 @@ export class PushService implements OnModuleInit {
               keys: { p256dh: sub.p256dh, auth: sub.auth },
             },
             body,
-            { TTL: 60 * 60 * 12, urgency: 'normal' },
+            { TTL: 60 * 60 * 12, urgency },
           );
         } catch (err: unknown) {
           const status = (err as { statusCode?: number })?.statusCode;
           if (status === 404 || status === 410) {
             await this.prisma.dT_PUSH_SUBSCRIPTION.delete({ where: { id: sub.id } }).catch(() => undefined);
+            this.logger.warn(`push stale sub removed for ${nik} (${status})`);
           } else {
-            this.logger.debug(`push fail ${nik}: ${(err as Error).message}`);
+            this.logger.warn(`push fail ${nik}: ${(err as Error).message}`);
           }
         }
       }),

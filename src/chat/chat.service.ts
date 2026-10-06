@@ -719,7 +719,7 @@ export class ChatService {
         : (dto.content || '').trim().slice(0, 120) ||
           (dto.attachments?.length ? 'mengirim lampiran' : 'pesan baru');
     const recipientNiks = members.map((m) => m.nik.trim()).filter((n) => n !== nik);
-    const chatUrl = `/dashboard/chat?room=${roomId}`;
+    const chatUrl = `/dashboard/chat/${roomId}`;
 
     if (dto.replyToId) {
       const parent = await this.prisma.dT_CHAT_MESSAGE.findUnique({
