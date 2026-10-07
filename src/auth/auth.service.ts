@@ -101,6 +101,24 @@ export class AuthService implements IAuthService {
     });
   }
 
+  /**
+   * Short-lived access JWT for cross-origin uploads (Vercel FE → Render BE).
+   * Same shape as access_token (no type) so AuthGuard Bearer works.
+   * FE ambil via same-origin rewrite (cookie), lalu kirim Authorization ke BE langsung.
+   */
+  async issueUploadTicket(user: { nik: string; nama: string; roleId: string }): Promise<string> {
+    const payload: JwtPayload = {
+      nik: user.nik,
+      nama: user.nama,
+      roleId: user.roleId,
+    };
+    return this.jwtService.signAsync(payload, {
+      secret: this.getAccessSecret(),
+      expiresIn: '15m' as any,
+      issuer: this.getIssuer(),
+    });
+  }
+
   private getRefreshExpiresInMs(): number {
     const duration = this.getRefreshExpiresIn();
     const match = duration.match(/^(\d+)([smhd])$/);

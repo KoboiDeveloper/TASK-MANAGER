@@ -179,6 +179,22 @@ export class AuthController {
     });
   }
 
+  /** Short-lived Bearer untuk upload langsung ke BE (bypass Vercel body limit). */
+  @UseGuards(AuthGuard)
+  @Get('upload-ticket')
+  async getUploadTicket(@Req() request: Request) {
+    const user = request['user'] as { nik: string; nama: string; roleId: string };
+    const token = await this.authService.issueUploadTicket({
+      nik: user.nik,
+      nama: user.nama,
+      roleId: user.roleId,
+    });
+    return new CommonResponse('Upload ticket issued', HttpStatus.OK, {
+      token,
+      expiresIn: 900,
+    });
+  }
+
   @Post('forgot-password')
   async sendOtpResetPw(@Body() request: ForgotPwRequest) {
     try {
