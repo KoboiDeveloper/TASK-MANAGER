@@ -32,6 +32,7 @@ export type MessageSummary = {
   from: string;
   to: string;
   cc: string;
+  bcc: string;
   date: number;
   fragment: string;
   size: number;
@@ -163,6 +164,9 @@ export class MailboxService {
   }
 
   async sendMessage(nik: string, dto: SendMessageDto) {
+    if (!this.splitAddrs(dto.to || '').length) {
+      throw new BadRequestException('Tambahkan minimal satu penerima');
+    }
     const e = this.buildMimeEmail(dto);
     const body = await this.withAuth(nik, (token) =>
       this.zimbra.call(token, {
@@ -174,17 +178,7 @@ export class MailboxService {
             e,
             su: { _content: dto.subject || '' },
             mp: this.buildBodyParts(dto),
-            ...(dto.attachmentAids
-              ? {
-                  attach: {
-                    aid: dto.attachmentAids
-                      .split(',')
-                      .map((s) => s.trim())
-                      .filter(Boolean)
-                      .join(','),
-                  },
-                }
-              : {}),
+            ...this.buildAttachBlock(dto),
           },
         },
       }),
@@ -203,17 +197,7 @@ export class MailboxService {
             e,
             su: { _content: dto.subject || '' },
             mp: this.buildBodyParts(dto),
-            ...(dto.attachmentAids
-              ? {
-                  attach: {
-                    aid: dto.attachmentAids
-                      .split(',')
-                      .map((s) => s.trim())
-                      .filter(Boolean)
-                      .join(','),
-                  },
-                }
-              : {}),
+            ...this.buildAttachBlock(dto),
           },
         },
       }),
@@ -222,6 +206,25 @@ export class MailboxService {
       (body as { SaveDraftResponse?: { m?: unknown } }).SaveDraftResponse?.m,
     )[0] as { id?: string } | undefined;
     return { ok: true, id: draft?.id || null };
+  }
+
+  /** Gabungkan aid baru + part lampiran yang sudah ada di draf. */
+  private buildAttachBlock(dto: SendMessageDto): { attach: Record<string, unknown> } | Record<string, never> {
+    const aids = (dto.attachmentAids || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const parts = (dto.attachmentParts || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const attach: Record<string, unknown> = {};
+    if (aids.length) attach.aid = aids.join(',');
+    if (parts.length && dto.draftId) {
+      attach.mp = parts.map((part) => ({ mid: dto.draftId, part }));
+    }
+    if (!Object.keys(attach).length) return {};
+    return { attach };
   }
 
   async messageAction(nik: string, id: string, dto: MessageActionDto) {
@@ -271,6 +274,146 @@ export class MailboxService {
       const o = t as { id?: string; name?: string; color?: string | number };
       return { id: String(o.id || ''), name: String(o.name || ''), color: o.color ?? null };
     });
+  }
+
+  /**
+   * Signature Zimbra akun (default + list).
+   * Dipakai compose: Zimbra dulu; FE boleh fallback custom lokal jika kosong.
+   */
+  async getSignatures(nik: string) {
+    const { signatures, defaultId } = await this.withAuth(nik, async (token) => {
+      const [sigBody, prefsBody] = await Promise.all([
+        this.zimbra.call(token, {
+          GetSignaturesRequest: { _jsns: 'urn:zimbraAccount' },
+        }),
+        this.zimbra.call(token, {
+          GetPrefsRequest: {
+            _jsns: 'urn:zimbraAccount',
+            pref: { name: 'zimbraPrefDefaultSignatureId' },
+          },
+        }),
+      ]);
+
+      const raw = this.asArray(
+        (sigBody as { GetSignaturesResponse?: { signature?: unknown } }).GetSignaturesResponse
+          ?.signature,
+      );
+      const signatures = raw.map((s) => this.mapSignature(s));
+
+      const prefs = this.asArray(
+        (prefsBody as { GetPrefsResponse?: { pref?: unknown } }).GetPrefsResponse?.pref,
+      );
+      let defaultId: string | null = null;
+      for (const p of prefs) {
+        const o = p as { name?: string; _content?: string };
+        if (o.name === 'zimbraPrefDefaultSignatureId' && o._content) {
+          defaultId = String(o._content);
+          break;
+        }
+      }
+      return { signatures, defaultId };
+    });
+
+    const defaultSig =
+      signatures.find((s) => s.id && s.id === defaultId) ||
+      signatures.find((s) => s.html.trim()) ||
+      signatures[0] ||
+      null;
+
+    return {
+      defaultId: defaultSig?.id || defaultId,
+      defaultHtml: defaultSig?.html || '',
+      signatures,
+    };
+  }
+
+  /** Buat / ubah signature HTML di Zimbra; set sebagai default bila baru. */
+  async saveSignature(
+    nik: string,
+    dto: { id?: string; name?: string; html: string },
+  ) {
+    const html = (dto.html || '').trim();
+    const name = (dto.name || 'Signature').trim() || 'Signature';
+
+    return this.withAuth(nik, async (token) => {
+      if (dto.id) {
+        await this.zimbra.call(token, {
+          ModifySignatureRequest: {
+            _jsns: 'urn:zimbraAccount',
+            signature: {
+              id: dto.id,
+              name,
+              content: [
+                { type: 'text/html', _content: html },
+                { type: 'text/plain', _content: this.stripHtml(html) },
+              ],
+            },
+          },
+        });
+        return { ok: true, id: dto.id };
+      }
+
+      const created = await this.zimbra.call(token, {
+        CreateSignatureRequest: {
+          _jsns: 'urn:zimbraAccount',
+          signature: {
+            name,
+            content: [
+              { type: 'text/html', _content: html },
+              { type: 'text/plain', _content: this.stripHtml(html) },
+            ],
+          },
+        },
+      });
+      const sig = this.asArray(
+        (created as { CreateSignatureResponse?: { signature?: unknown } }).CreateSignatureResponse
+          ?.signature,
+      )[0] as { id?: string } | undefined;
+      const id = sig?.id ? String(sig.id) : null;
+      if (id) {
+        try {
+          await this.zimbra.call(token, {
+            ModifyPrefsRequest: {
+              _jsns: 'urn:zimbraAccount',
+              pref: [{ name: 'zimbraPrefDefaultSignatureId', _content: id }],
+            },
+          });
+        } catch {
+          /* default pref optional */
+        }
+      }
+      return { ok: true, id };
+    });
+  }
+
+  private mapSignature(raw: unknown): {
+    id: string;
+    name: string;
+    html: string;
+    text: string;
+  } {
+    const s = raw as {
+      id?: string;
+      name?: string;
+      content?: unknown;
+    };
+    const contents = this.asArray(s.content) as Array<{
+      type?: string;
+      _content?: string;
+    }>;
+    const html =
+      contents.find((c) => String(c.type || '').includes('html'))?._content ||
+      contents.find((c) => c._content)?._content ||
+      '';
+    const text =
+      contents.find((c) => String(c.type || '').includes('plain'))?._content ||
+      this.stripHtml(html);
+    return {
+      id: String(s.id || ''),
+      name: String(s.name || 'Signature'),
+      html: String(html || ''),
+      text: String(text || ''),
+    };
   }
 
   async autocomplete(nik: string, q: string) {
@@ -368,38 +511,128 @@ export class MailboxService {
     return { name: '', email: raw.trim() };
   }
 
-  async uploadAttachment(nik: string, file: Express.Multer.File) {
+  /** Di atas threshold → Dropbox shared link (bukan attachment Zimbra). */
+  static readonly DROPBOX_THRESHOLD_BYTES = 25 * 1024 * 1024;
+  /** Max via Dropbox (Zimbra tetap hanya file ≤ threshold). */
+  static readonly MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024 * 1024;
+
+  async uploadAttachment(
+    nik: string,
+    file: Express.Multer.File,
+    options?: { expiresAt?: string; password?: string; signal?: AbortSignal },
+  ) {
     if (!file) throw new BadRequestException('File wajib');
-    const DROPBOX_THRESHOLD = 5 * 1024 * 1024;
-    const MAX_SIZE = 100 * 1024 * 1024;
-    if (file.size > MAX_SIZE) {
-      throw new BadRequestException('Lampiran maksimal 100MB');
+    if (file.size > MailboxService.MAX_ATTACHMENT_BYTES) {
+      throw new BadRequestException('Lampiran maksimal 2GB');
     }
+    this.throwIfUploadAborted(options?.signal);
 
     const filename = file.originalname || 'file';
-    if (file.size > DROPBOX_THRESHOLD) {
-      const safeName = filename.replace(/[^\w.\- ()[\]]+/g, '_').slice(0, 180);
-      const path = `mailbox/${nik.trim()}/${Date.now()}-${randomUUID().slice(0, 8)}-${safeName}`;
-      const uploaded = await this.dropbox.uploadFile(
-        path,
-        file.buffer,
-        file.mimetype || 'application/octet-stream',
+
+    try {
+      if (file.size > MailboxService.DROPBOX_THRESHOLD_BYTES) {
+        const password = options?.password?.trim() || undefined;
+        if (password && password.length < 4) {
+          throw new BadRequestException('Password file minimal 4 karakter');
+        }
+
+        let expiresAt: Date | undefined;
+        if (options?.expiresAt) {
+          const d = new Date(options.expiresAt);
+          if (Number.isNaN(d.getTime())) {
+            throw new BadRequestException('Tanggal kadaluarsa tidak valid');
+          }
+          if (d.getTime() <= Date.now() + 5 * 60_000) {
+            throw new BadRequestException('Kadaluarsa harus lebih dari 5 menit dari sekarang');
+          }
+          const max = Date.now() + 366 * 24 * 60 * 60_000;
+          if (d.getTime() > max) {
+            throw new BadRequestException('Kadaluarsa maksimal 1 tahun');
+          }
+          expiresAt = d;
+        }
+
+        this.throwIfUploadAborted(options?.signal);
+
+        const safeName = filename.replace(/[^\w.\- ()[\]]+/g, '_').slice(0, 180);
+        const path = `mailbox/${nik.trim()}/${Date.now()}-${randomUUID().slice(0, 8)}-${safeName}`;
+        const mime = file.mimetype || 'application/octet-stream';
+
+        const uploaded = file.path
+          ? await this.dropbox.uploadLocalFileWithShareOptions(
+              path,
+              file.path,
+              file.size,
+              mime,
+              { expiresAt, password, signal: options?.signal },
+            )
+          : await this.dropbox.uploadFileWithShareOptions(
+              path,
+              await this.readUploadBuffer(file),
+              mime,
+              { expiresAt, password, signal: options?.signal },
+            );
+
+        this.throwIfUploadAborted(options?.signal);
+
+        const url = uploaded.passwordProtected
+          ? uploaded.url
+          : this.toDropboxDownloadUrl(uploaded.url);
+
+        return {
+          via: 'dropbox' as const,
+          url,
+          filename,
+          size: file.size,
+          expiresAt: uploaded.expiresAt ?? expiresAt?.toISOString() ?? null,
+          passwordProtected: uploaded.passwordProtected,
+        };
+      }
+
+      this.throwIfUploadAborted(options?.signal);
+
+      // Zimbra upload expects Multer file with buffer
+      const buffer = await this.readUploadBuffer(file);
+      const zimbraFile = { ...file, buffer };
+      const zimbra = await this.withAuth(nik, (token) =>
+        this.zimbra.uploadAttachment(token, zimbraFile as Express.Multer.File),
       );
       return {
-        via: 'dropbox' as const,
-        url: this.toDropboxDownloadUrl(uploaded.url),
+        via: 'zimbra' as const,
+        aid: zimbra.aid,
         filename,
         size: file.size,
+        expiresAt: null,
+        passwordProtected: false,
       };
+    } finally {
+      await this.cleanupUploadTemp(file);
     }
+  }
 
-    const zimbra = await this.withAuth(nik, (token) => this.zimbra.uploadAttachment(token, file));
-    return {
-      via: 'zimbra' as const,
-      aid: zimbra.aid,
-      filename,
-      size: file.size,
-    };
+  private throwIfUploadAborted(signal?: AbortSignal) {
+    if (signal?.aborted) {
+      throw new BadRequestException('Upload dibatalkan');
+    }
+  }
+
+  private async readUploadBuffer(file: Express.Multer.File): Promise<Buffer> {
+    if (file.buffer?.length) return file.buffer;
+    if (file.path) {
+      const { readFile } = await import('fs/promises');
+      return readFile(file.path);
+    }
+    throw new BadRequestException('File upload kosong');
+  }
+
+  private async cleanupUploadTemp(file: Express.Multer.File): Promise<void> {
+    if (!file.path) return;
+    try {
+      const { unlink } = await import('fs/promises');
+      await unlink(file.path);
+    } catch {
+      // ignore
+    }
   }
 
   private toDropboxDownloadUrl(url: string): string {
@@ -474,7 +707,7 @@ export class MailboxService {
       if (m) e.push({ t, a: m[2].trim(), ...(m[1].trim() ? { p: m[1].trim() } : {}) });
       else e.push({ t, a: raw });
     };
-    for (const addr of this.splitAddrs(dto.to)) push('t', addr);
+    for (const addr of this.splitAddrs(dto.to || '')) push('t', addr);
     for (const addr of this.splitAddrs(dto.cc || '')) push('c', addr);
     for (const addr of this.splitAddrs(dto.bcc || '')) push('b', addr);
     return e;
@@ -558,7 +791,10 @@ export class MailboxService {
       absFolderPath?: string;
       path?: string;
       u?: number | string;
+      /** IMAP unread — fallback bila `u` kosong di beberapa setup Zimbra */
+      i4u?: number | string;
       n?: number | string;
+      i4n?: number | string;
       view?: string;
       color?: number | string;
       rgb?: string;
@@ -576,13 +812,16 @@ export class MailboxService {
         ? f.rgb.trim()
         : null;
 
+    const unread = Number(f.u ?? f.i4u ?? 0);
+    const total = Number(f.n ?? f.i4n ?? 0);
+
     return {
       id: String(f.id || ''),
       name: String(f.name || ''),
       path: String(f.absFolderPath || f.path || f.name || ''),
       absFolderPath: f.absFolderPath,
-      u: Number(f.u || 0),
-      n: Number(f.n || 0),
+      u: Number.isFinite(unread) ? unread : 0,
+      n: Number.isFinite(total) ? total : 0,
       view: f.view,
       color,
       rgb,
@@ -608,6 +847,7 @@ export class MailboxService {
       e.p || e.d ? `${(e.p || e.d || '').replace(/[,<>"]/g, ' ').trim()} <${e.a || ''}>` : e.a || '';
     const to = emails.filter((e) => e.t === 't');
     const cc = emails.filter((e) => e.t === 'c');
+    const bcc = emails.filter((e) => e.t === 'b');
     const flags = String(m.f || '');
     return {
       id: String(m.id || ''),
@@ -615,6 +855,7 @@ export class MailboxService {
       from: from ? `${from.p || from.d || ''} <${from.a || ''}>`.trim() : '',
       to: to.map(fmt).join(', '),
       cc: cc.map(fmt).join(', '),
+      bcc: bcc.map(fmt).join(', '),
       date: Number(m.d || 0),
       fragment: String(m.fr || ''),
       size: Number(m.s || 0),

@@ -52,41 +52,131 @@ export class DropboxStorageService implements IStorageService {
     buffer: Buffer,
     contentType: string,
   ): Promise<{ url: string; path: string }> {
+    const result = await this.uploadFileWithShareOptions(path, buffer, contentType);
+    return { url: result.url, path: result.path };
+  }
+
+  /**
+   * Upload + shared link dengan opsi kadaluarsa / password (untuk lampiran email besar).
+   * Link ber-password dikembalikan sebagai URL halaman Dropbox (bukan direct download).
+   */
+  async uploadFileWithShareOptions(
+    path: string,
+    buffer: Buffer,
+    contentType: string,
+    options?: { expiresAt?: Date; password?: string; signal?: AbortSignal },
+  ): Promise<{
+    url: string;
+    path: string;
+    expiresAt?: string;
+    passwordProtected: boolean;
+  }> {
+    return this.uploadWithShareOptionsInternal(path, contentType, options, {
+      kind: 'buffer',
+      buffer,
+    });
+  }
+
+  /** Upload dari file di disk (chunked) — hindari load 200MB+ penuh ke RAM. */
+  async uploadLocalFileWithShareOptions(
+    path: string,
+    localFilePath: string,
+    size: number,
+    contentType: string,
+    options?: { expiresAt?: Date; password?: string; signal?: AbortSignal },
+  ): Promise<{
+    url: string;
+    path: string;
+    expiresAt?: string;
+    passwordProtected: boolean;
+  }> {
+    return this.uploadWithShareOptionsInternal(path, contentType, options, {
+      kind: 'file',
+      localFilePath,
+      size,
+    });
+  }
+
+  private throwIfAborted(signal?: AbortSignal) {
+    if (signal?.aborted) {
+      throw new BadRequestException('Upload dibatalkan');
+    }
+  }
+
+  private async uploadWithShareOptionsInternal(
+    path: string,
+    contentType: string,
+    options: { expiresAt?: Date; password?: string; signal?: AbortSignal } | undefined,
+    source: { kind: 'buffer'; buffer: Buffer } | { kind: 'file'; localFilePath: string; size: number },
+  ): Promise<{
+    url: string;
+    path: string;
+    expiresAt?: string;
+    passwordProtected: boolean;
+  }> {
+    let uploadedPath: string | undefined;
     try {
-      // Normalize path - ensure no leading slash issues
+      this.throwIfAborted(options?.signal);
       const normalizedPath = path.startsWith('/') ? path.substring(1) : path;
       const fullPath = `${this.basePath}/${normalizedPath}`;
+      const size = source.kind === 'buffer' ? source.buffer.length : source.size;
 
       this.logger.debug(`Uploading file to Dropbox: ${fullPath}`);
-      this.logger.debug(`File size: ${buffer.length} bytes, Content-Type: ${contentType}`);
+      this.logger.debug(`File size: ${size} bytes, Content-Type: ${contentType}`);
 
-      // Upload file ke Dropbox
-      const uploadResponse = await this.dropbox.filesUpload({
-        path: fullPath,
-        contents: buffer,
-        mode: { '.tag': 'add' },
-        autorename: true,
-        mute: false,
-      });
-
-      const uploadedPath = uploadResponse.result.path_display || fullPath;
+      uploadedPath =
+        source.kind === 'buffer'
+          ? await this.uploadBuffer(fullPath, source.buffer, options?.signal)
+          : await this.uploadLocalFile(fullPath, source.localFilePath, source.size, options?.signal);
       this.logger.debug(`File uploaded to Dropbox at: ${uploadedPath}`);
 
-      // Buat atau ambil shared link
-      const sharedUrl = await this.getOrCreateSharedLink(uploadedPath);
+      this.throwIfAborted(options?.signal);
 
-      // Convert Dropbox preview URL ke direct download URL
-      const directUrl = this.toDirectUrl(sharedUrl);
-      this.logger.log(`File uploaded successfully: ${directUrl}`);
+      const password = options?.password?.trim() || undefined;
+      const expiresAt = options?.expiresAt;
+      const link = await this.createSharedLinkSafe(uploadedPath, { expiresAt, password });
+
+      this.throwIfAborted(options?.signal);
+
+      const url = link.passwordProtected ? link.url : this.toDirectUrl(link.url);
+      this.logger.log(`File uploaded successfully: ${url}`);
 
       return {
-        url: directUrl,
+        url,
         path: uploadedPath,
+        expiresAt: link.expiresAt,
+        passwordProtected: link.passwordProtected,
       };
     } catch (error: any) {
-      this.logger.error(`Failed to upload file: ${path}`, error?.message);
+      if (error instanceof BadRequestException) {
+        // Klien abort setelah file sempat masuk Dropbox → hapus agar tidak menumpuk
+        if (error.message === 'Upload dibatalkan' && uploadedPath) {
+          try {
+            await this.deleteFile(uploadedPath);
+            this.logger.warn(`Dropbox file dihapus karena upload dibatalkan: ${uploadedPath}`);
+          } catch (delErr: any) {
+            this.logger.warn(`Gagal hapus file abort Dropbox: ${delErr?.message || delErr}`);
+          }
+        }
+        throw error;
+      }
+      const tag =
+        error?.error?.error?.['.tag'] ||
+        error?.error?.['.tag'] ||
+        error?.error?.error?.shared_link_settings_error?.['.tag'];
+      if (tag === 'not_authorized' || tag === 'shared_link_settings_error') {
+        throw new BadRequestException(
+          'Akun Dropbox tidak mengizinkan password/kadaluarsa pada shared link. Coba tanpa password/kadaluarsa.',
+        );
+      }
+      const detail =
+        error?.error?.error_summary ||
+        error?.error?.error?.['.tag'] ||
+        error?.message ||
+        'Unknown error';
+      this.logger.error(`Failed to upload file: ${path}`, detail);
       this.logger.error(`Error details:`, JSON.stringify(error?.error || error, null, 2));
-      throw new BadRequestException(`Failed to upload file: ${error?.message || 'Unknown error'}`);
+      throw new BadRequestException(`Gagal upload Dropbox: ${detail}`);
     }
   }
 
@@ -153,18 +243,193 @@ export class DropboxStorageService implements IStorageService {
    * (sharingCreateSharedLink sudah deprecated)
    */
   private async getOrCreateSharedLink(filePath: string): Promise<string> {
+    return this.createSharedLink(filePath);
+  }
+
+  /**
+   * Dropbox filesUpload max ~150MB — di atas itu pakai upload session (chunked).
+   */
+  private async uploadBuffer(
+    fullPath: string,
+    buffer: Buffer,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    return this.uploadSession(
+      fullPath,
+      buffer.length,
+      async (offset, len) => buffer.subarray(offset, offset + len),
+      signal,
+    );
+  }
+
+  private async uploadLocalFile(
+    fullPath: string,
+    localFilePath: string,
+    size: number,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    const { open } = await import('fs/promises');
+    const fh = await open(localFilePath, 'r');
     try {
-      // ✅ Pakai API terbaru (bukan yang deprecated)
+      return await this.uploadSession(
+        fullPath,
+        size,
+        async (offset, len) => {
+          const buf = Buffer.alloc(len);
+          const { bytesRead } = await fh.read(buf, 0, len, offset);
+          return bytesRead === len ? buf : buf.subarray(0, bytesRead);
+        },
+        signal,
+      );
+    } finally {
+      await fh.close();
+    }
+  }
+
+  private async uploadSession(
+    fullPath: string,
+    size: number,
+    readChunk: (offset: number, len: number) => Promise<Buffer>,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    const SINGLE_MAX = 140 * 1024 * 1024;
+    const CHUNK = 8 * 1024 * 1024;
+
+    this.throwIfAborted(signal);
+
+    if (size <= SINGLE_MAX) {
+      const contents = await readChunk(0, size);
+      this.throwIfAborted(signal);
+      const uploadResponse = await this.dropbox.filesUpload({
+        path: fullPath,
+        contents,
+        mode: { '.tag': 'add' },
+        autorename: true,
+        mute: false,
+      });
+      this.throwIfAborted(signal);
+      return uploadResponse.result.path_display || fullPath;
+    }
+
+    this.logger.log(
+      `Large Dropbox upload (${(size / (1024 * 1024)).toFixed(1)} MB) via session: ${fullPath}`,
+    );
+
+    const firstLen = Math.min(CHUNK, size);
+    const first = await readChunk(0, firstLen);
+    this.throwIfAborted(signal);
+    const start = await this.dropbox.filesUploadSessionStart({
+      contents: first,
+      close: false,
+    });
+    let offset = first.length;
+    const sessionId = start.result.session_id;
+
+    while (offset < size) {
+      this.throwIfAborted(signal);
+      const toRead = Math.min(CHUNK, size - offset);
+      const chunk = await readChunk(offset, toRead);
+      const isLast = offset + chunk.length >= size;
+
+      if (isLast) {
+        this.throwIfAborted(signal);
+        const finished = await this.dropbox.filesUploadSessionFinish({
+          cursor: { session_id: sessionId, offset },
+          commit: {
+            path: fullPath,
+            mode: { '.tag': 'add' },
+            autorename: true,
+            mute: false,
+          },
+          contents: chunk,
+        });
+        this.throwIfAborted(signal);
+        return finished.result.path_display || fullPath;
+      }
+
+      await this.dropbox.filesUploadSessionAppendV2({
+        cursor: { session_id: sessionId, offset },
+        contents: chunk,
+        close: false,
+      });
+      offset += chunk.length;
+    }
+
+    this.throwIfAborted(signal);
+    const finished = await this.dropbox.filesUploadSessionFinish({
+      cursor: { session_id: sessionId, offset },
+      commit: {
+        path: fullPath,
+        mode: { '.tag': 'add' },
+        autorename: true,
+        mute: false,
+      },
+      contents: Buffer.alloc(0),
+    });
+    this.throwIfAborted(signal);
+    return finished.result.path_display || fullPath;
+  }
+
+  private async createSharedLinkSafe(
+    filePath: string,
+    options?: { expiresAt?: Date; password?: string },
+  ): Promise<{ url: string; passwordProtected: boolean; expiresAt?: string }> {
+    const password = options?.password?.trim() || undefined;
+    const expiresAt = options?.expiresAt;
+
+    try {
+      const url = await this.createSharedLink(filePath, { expiresAt, password });
+      return {
+        url,
+        passwordProtected: Boolean(password),
+        expiresAt: expiresAt?.toISOString(),
+      };
+    } catch (err: any) {
+      const tag =
+        err?.error?.error?.['.tag'] ||
+        err?.error?.error?.shared_link_settings_error?.['.tag'] ||
+        err?.error?.['.tag'];
+      this.logger.warn(
+        `Shared link with options failed (${tag || err?.message}); retrying public link without password/expiry`,
+      );
+      // Fallback: tautan publik tanpa password/kadaluarsa (akun Dropbox basic sering menolak settings)
+      const url = await this.createSharedLink(filePath);
+      return { url, passwordProtected: false, expiresAt: undefined };
+    }
+  }
+
+  private async createSharedLink(
+    filePath: string,
+    options?: { expiresAt?: Date; password?: string },
+  ): Promise<string> {
+    const password = options?.password?.trim() || undefined;
+    const expires = options?.expiresAt?.toISOString();
+
+    const settings: {
+      require_password?: boolean;
+      link_password?: string;
+      expires?: string;
+      requested_visibility?: { '.tag': 'public' | 'team_only' | 'password' };
+      allow_download?: boolean;
+    } = {
+      allow_download: true,
+      requested_visibility: password ? { '.tag': 'password' } : { '.tag': 'public' },
+    };
+
+    if (password) {
+      settings.require_password = true;
+      settings.link_password = password;
+    }
+    if (expires) settings.expires = expires;
+
+    try {
       const linkResponse = await this.dropbox.sharingCreateSharedLinkWithSettings({
         path: filePath,
-        settings: {
-          requested_visibility: { '.tag': 'public' },
-        },
+        settings,
       });
       this.logger.debug(`Shared link created: ${linkResponse.result.url}`);
       return linkResponse.result.url;
     } catch (linkError: any) {
-      // Jika link sudah ada, ambil yang existing
       if (
         linkError?.error?.error?.['.tag'] === 'shared_link_already_exists' ||
         linkError?.error?.['.tag'] === 'shared_link_already_exists'
@@ -172,15 +437,37 @@ export class DropboxStorageService implements IStorageService {
         this.logger.debug(`Shared link already exists, fetching existing link...`);
         const listResponse = await this.dropbox.sharingListSharedLinks({
           path: filePath,
-          direct_only: true, // ✅ Hanya ambil link untuk file ini, bukan folder parent
+          direct_only: true,
         });
 
         if (!listResponse.result.links.length) {
           throw new Error('Failed to get existing shared link');
         }
 
-        this.logger.debug(`Found existing shared link: ${listResponse.result.links[0].url}`);
-        return listResponse.result.links[0].url;
+        const existingUrl = listResponse.result.links[0].url;
+        if (password || expires) {
+          try {
+            const modified = await this.dropbox.sharingModifySharedLinkSettings({
+              url: existingUrl,
+              settings: {
+                require_password: Boolean(password),
+                ...(password ? { link_password: password } : {}),
+                ...(expires ? { expires } : {}),
+                allow_download: true,
+              },
+              remove_expiration: !expires,
+            });
+            return modified.result.url;
+          } catch (modErr) {
+            this.logger.warn(
+              `Could not modify existing shared link settings`,
+              (modErr as Error)?.message,
+            );
+          }
+        }
+
+        this.logger.debug(`Found existing shared link: ${existingUrl}`);
+        return existingUrl;
       }
 
       this.logger.error(`Failed to create/get shared link:`, linkError);

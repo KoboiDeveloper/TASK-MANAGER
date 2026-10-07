@@ -6,21 +6,32 @@ import {
   HttpStatus,
   Param,
   Post,
+  Put,
   Query,
   Req,
   Res,
   UploadedFile,
+  UseFilters,
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { memoryStorage } from 'multer';
+import { diskStorage } from 'multer';
+import { randomUUID } from 'crypto';
+import { tmpdir } from 'os';
+import { extname } from 'path';
 import type { Request, Response } from 'express';
 import { AuthGuard } from '../security/authGuard';
 import { CommonResponse } from '../common/commonResponse';
 import { handleException } from '../utils/handleException';
 import { MailboxService } from './mailbox.service';
-import { ConnectMailboxDto, MessageActionDto, SendMessageDto } from './dto/mailbox.dto';
+import {
+  ConnectMailboxDto,
+  MessageActionDto,
+  SaveSignatureDto,
+  SendMessageDto,
+} from './dto/mailbox.dto';
+import { MulterExceptionFilter } from './multer-exception.filter';
 
 type AuthUser = { nik: string };
 
@@ -35,7 +46,7 @@ export class MailboxController {
       const data = await this.mailbox.getStatus(req.user!.nik);
       return new CommonResponse('Mailbox status', HttpStatus.OK, data);
     } catch (e) {
-      return handleException((e as Error).message);
+      return handleException(e);
     }
   }
 
@@ -45,7 +56,7 @@ export class MailboxController {
       const data = await this.mailbox.connect(req.user!.nik, dto);
       return new CommonResponse('Mailbox connected', HttpStatus.OK, data);
     } catch (e) {
-      return handleException((e as Error).message);
+      return handleException(e);
     }
   }
 
@@ -55,7 +66,7 @@ export class MailboxController {
       const data = await this.mailbox.disconnect(req.user!.nik);
       return new CommonResponse('Mailbox disconnected', HttpStatus.OK, data);
     } catch (e) {
-      return handleException((e as Error).message);
+      return handleException(e);
     }
   }
 
@@ -65,7 +76,7 @@ export class MailboxController {
       const data = await this.mailbox.getFolders(req.user!.nik);
       return new CommonResponse('Folders', HttpStatus.OK, data);
     } catch (e) {
-      return handleException((e as Error).message);
+      return handleException(e);
     }
   }
 
@@ -86,7 +97,7 @@ export class MailboxController {
       });
       return new CommonResponse('Messages', HttpStatus.OK, data);
     } catch (e) {
-      return handleException((e as Error).message);
+      return handleException(e);
     }
   }
 
@@ -96,7 +107,7 @@ export class MailboxController {
       const data = await this.mailbox.getMessage(req.user!.nik, id);
       return new CommonResponse('Message', HttpStatus.OK, data);
     } catch (e) {
-      return handleException((e as Error).message);
+      return handleException(e);
     }
   }
 
@@ -106,7 +117,7 @@ export class MailboxController {
       const data = await this.mailbox.sendMessage(req.user!.nik, dto);
       return new CommonResponse('Sent', HttpStatus.OK, data);
     } catch (e) {
-      return handleException((e as Error).message);
+      return handleException(e);
     }
   }
 
@@ -116,7 +127,7 @@ export class MailboxController {
       const data = await this.mailbox.saveDraft(req.user!.nik, dto);
       return new CommonResponse('Draft saved', HttpStatus.OK, data);
     } catch (e) {
-      return handleException((e as Error).message);
+      return handleException(e);
     }
   }
 
@@ -130,7 +141,7 @@ export class MailboxController {
       const data = await this.mailbox.messageAction(req.user!.nik, id, dto);
       return new CommonResponse('Action ok', HttpStatus.OK, data);
     } catch (e) {
-      return handleException((e as Error).message);
+      return handleException(e);
     }
   }
 
@@ -140,7 +151,7 @@ export class MailboxController {
       const data = await this.mailbox.autocomplete(req.user!.nik, q || '');
       return new CommonResponse('Autocomplete', HttpStatus.OK, data);
     } catch (e) {
-      return handleException((e as Error).message);
+      return handleException(e);
     }
   }
 
@@ -150,26 +161,78 @@ export class MailboxController {
       const data = await this.mailbox.getTags(req.user!.nik);
       return new CommonResponse('Tags', HttpStatus.OK, data);
     } catch (e) {
-      return handleException((e as Error).message);
+      return handleException(e);
+    }
+  }
+
+  @Get('signatures')
+  async signatures(@Req() req: Request & { user?: AuthUser }) {
+    try {
+      const data = await this.mailbox.getSignatures(req.user!.nik);
+      return new CommonResponse('Signatures', HttpStatus.OK, data);
+    } catch (e) {
+      return handleException(e);
+    }
+  }
+
+  @Put('signatures')
+  async saveSignature(@Req() req: Request & { user?: AuthUser }, @Body() dto: SaveSignatureDto) {
+    try {
+      const data = await this.mailbox.saveSignature(req.user!.nik, dto);
+      return new CommonResponse('Signature saved', HttpStatus.OK, data);
+    } catch (e) {
+      return handleException(e);
     }
   }
 
   @Post('attachments')
+  @UseFilters(MulterExceptionFilter)
   @UseInterceptors(
     FileInterceptor('file', {
-      storage: memoryStorage(),
-      limits: { fileSize: 100 * 1024 * 1024 },
+      storage: diskStorage({
+        destination: tmpdir(),
+        filename: (_req, file, cb) => {
+          const ext = extname(file.originalname || '').slice(0, 32);
+          cb(null, `mailbox-up-${Date.now()}-${randomUUID()}${ext}`);
+        },
+      }),
+      // Dropbox large attachments up to 2GB (Zimbra path still capped in service at 25MB)
+      limits: { fileSize: 2 * 1024 * 1024 * 1024 },
     }),
   )
   async upload(
     @Req() req: Request & { user?: AuthUser },
+    @Res({ passthrough: true }) res: Response,
     @UploadedFile() file: Express.Multer.File,
+    @Body('expiresAt') expiresAt?: string,
+    @Body('password') password?: string,
   ) {
+    // Refresh / tutup tab / abort XHR → hentikan Dropbox di tengah jalan.
+    // Pakai res.close (bukan req.close): req.close sering ikut setelah body multer selesai
+    // padahal klien masih menunggu response.
+    const ac = new AbortController();
+    let settled = false;
+    const onClientGone = () => {
+      if (settled || ac.signal.aborted) return;
+      if (!res.writableFinished) ac.abort();
+    };
+    res.on('close', onClientGone);
+    req.on('aborted', onClientGone);
     try {
-      const data = await this.mailbox.uploadAttachment(req.user!.nik, file);
+      const data = await this.mailbox.uploadAttachment(req.user!.nik, file, {
+        expiresAt,
+        password,
+        signal: ac.signal,
+      });
+      settled = true;
       return new CommonResponse('Uploaded', HttpStatus.OK, data);
     } catch (e) {
-      return handleException((e as Error).message);
+      settled = true;
+      return handleException(e);
+    } finally {
+      settled = true;
+      res.off('close', onClientGone);
+      req.off('aborted', onClientGone);
     }
   }
 
@@ -193,8 +256,7 @@ export class MailboxController {
       }
       res.send(file.buffer);
     } catch (e) {
-      const msg = (e as Error).message;
-      res.status(400).json(handleException(msg));
+      res.status(400).json(handleException(e));
     }
   }
 }

@@ -10,8 +10,10 @@ export class ConnectMailboxDto {
 }
 
 export class SendMessageDto {
+  /** Boleh kosong saat menyimpan draf; wajib saat kirim (dicek di service). */
+  @IsOptional()
   @IsString()
-  to: string;
+  to?: string;
 
   @IsOptional()
   @IsString()
@@ -45,6 +47,14 @@ export class SendMessageDto {
   @IsOptional()
   @IsString()
   attachmentAids?: string;
+
+  /**
+   * Part lampiran yang sudah ada di draf (comma-separated),
+   * di-reattach via attach.mp saat update/kirim draf.
+   */
+  @IsOptional()
+  @IsString()
+  attachmentParts?: string;
 }
 
 export class MessageActionDto {
@@ -58,4 +68,18 @@ export class MessageActionDto {
   @IsOptional()
   @IsString()
   tagName?: string;
+}
+
+export class SaveSignatureDto {
+  @IsOptional()
+  @IsString()
+  id?: string;
+
+  @IsOptional()
+  @IsString()
+  name?: string;
+
+  /** HTML signature (Zimbra text/html) */
+  @IsString()
+  html: string;
 }
