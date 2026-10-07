@@ -179,8 +179,8 @@ export class MailboxService {
             ...(prepared.dto.inReplyTo ? { origid: prepared.dto.inReplyTo, rt: 'r' } : {}),
             e,
             su: { _content: prepared.dto.subject || '' },
-            mp: this.buildBodyParts(prepared.dto),
-            ...this.buildAttachBlock(prepared.dto, prepared.glyphAid),
+            mp: this.buildBodyParts(prepared.dto, prepared.glyphAid),
+            ...this.buildAttachBlock(prepared.dto),
           },
         },
       });
@@ -199,8 +199,8 @@ export class MailboxService {
             ...(prepared.dto.draftId ? { id: prepared.dto.draftId } : {}),
             e,
             su: { _content: prepared.dto.subject || '' },
-            mp: this.buildBodyParts(prepared.dto),
-            ...this.buildAttachBlock(prepared.dto, prepared.glyphAid),
+            mp: this.buildBodyParts(prepared.dto, prepared.glyphAid),
+            ...this.buildAttachBlock(prepared.dto),
           },
         },
       });
@@ -244,10 +244,9 @@ export class MailboxService {
     }
   }
 
-  /** Gabungkan aid baru + part lampiran yang sudah ada di draf + logo inline. */
+  /** Gabungkan aid baru + part lampiran yang sudah ada di draf. */
   private buildAttachBlock(
     dto: SendMessageDto,
-    glyphAid?: string,
   ): { attach: Record<string, unknown> } | Record<string, never> {
     const aids = (dto.attachmentAids || '')
       .split(',')
@@ -257,20 +256,12 @@ export class MailboxService {
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean);
-    const mp: Record<string, unknown>[] = [];
-    if (parts.length && dto.draftId) {
-      for (const part of parts) mp.push({ mid: dto.draftId, part });
-    }
-    if (glyphAid) {
-      mp.push({
-        aid: glyphAid,
-        ci: `<${DROPBOX_GLYPH_CID}>`,
-        cd: 'inline',
-      });
-    }
     const attach: Record<string, unknown> = {};
     if (aids.length) attach.aid = aids.join(',');
-    if (mp.length) attach.mp = mp;
+    // attach.mp = MimePartAttachSpec → wajib mid+part (pesan lama), bukan upload aid
+    if (parts.length && dto.draftId) {
+      attach.mp = parts.map((part) => ({ mid: dto.draftId, part }));
+    }
     if (!Object.keys(attach).length) return {};
     return { attach };
   }
@@ -761,19 +752,39 @@ export class MailboxService {
     return e;
   }
 
-  private buildBodyParts(dto: SendMessageDto) {
+  private buildBodyParts(dto: SendMessageDto, glyphAid?: string) {
     const html = dto.bodyHtml?.trim();
     const text = dto.bodyText?.trim() || this.stripHtml(html || '');
-    if (html) {
+    if (!html) {
+      return { ct: 'text/plain', content: { _content: text } };
+    }
+
+    const alternative = {
+      ct: 'multipart/alternative',
+      mp: [
+        { ct: 'text/plain', content: { _content: text } },
+        { ct: 'text/html', content: { _content: html } },
+      ],
+    };
+
+    // Logo kartu Dropbox: multipart/related + cid (bukan attach.mp — itu butuh mid)
+    if (glyphAid) {
       return {
-        ct: 'multipart/alternative',
+        ct: 'multipart/related',
         mp: [
-          { ct: 'text/plain', content: { _content: text } },
-          { ct: 'text/html', content: { _content: html } },
+          alternative,
+          {
+            ct: 'image/png',
+            ci: DROPBOX_GLYPH_CID,
+            cd: 'inline',
+            filename: 'dropbox-glyph.png',
+            attach: { aid: glyphAid },
+          },
         ],
       };
     }
-    return { ct: 'text/plain', content: { _content: text } };
+
+    return alternative;
   }
 
   private splitAddrs(raw: string): string[] {
