@@ -19,6 +19,10 @@ export type FolderNode = {
   u?: number;
   n?: number;
   view?: string;
+  /** Zimbra palette index 0–127 (client biasanya 0–9) */
+  color?: number | null;
+  /** Zimbra RGB `#rrggbb` bila di-set custom */
+  rgb?: string | null;
   children: FolderNode[];
 };
 
@@ -556,8 +560,22 @@ export class MailboxService {
       u?: number | string;
       n?: number | string;
       view?: string;
+      color?: number | string;
+      rgb?: string;
       folder?: unknown;
     };
+
+    let color: number | null = null;
+    if (f.color != null && f.color !== '') {
+      const n = Number(f.color);
+      color = Number.isFinite(n) ? n : null;
+    }
+
+    const rgb =
+      typeof f.rgb === 'string' && /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(f.rgb.trim())
+        ? f.rgb.trim()
+        : null;
+
     return {
       id: String(f.id || ''),
       name: String(f.name || ''),
@@ -566,6 +584,8 @@ export class MailboxService {
       u: Number(f.u || 0),
       n: Number(f.n || 0),
       view: f.view,
+      color,
+      rgb,
       children: this.asArray(f.folder).map((c) => this.mapFolder(c)),
     };
   }
@@ -615,7 +635,31 @@ export class MailboxService {
       cid?: string;
       irt?: string;
     };
-    const { html, text, attachments } = this.extractParts(m.mp);
+    let { html, text, attachments } = this.extractParts(m.mp);
+
+    if (html && summary.id) {
+      for (const att of attachments) {
+        const url = `/api/mailbox/attachments/${encodeURIComponent(summary.id)}/${encodeURIComponent(att.part)}`;
+        if (att.contentId) {
+          const safeCid = att.contentId.replace(new RegExp("[.*+?^()|\[\]\\]", "g"), "\$&");
+          html = html.replace(new RegExp(`cid:${safeCid}`, 'gi'), url);
+        }
+        if (att.filename) {
+          const safeFn = att.filename.replace(new RegExp("[.*+?^()|\[\]\\]", "g"), "\$&");
+          html = html.replace(new RegExp(`cid:${safeFn}`, 'gi'), url);
+        }
+        const safePart = att.part.replace(new RegExp("[.*+?^()|\[\]\\]", "g"), "\$&");
+        html = html.replace(new RegExp(`cid:${safePart}`, 'gi'), url);
+      }
+
+      html = html.replace(
+        /(?:https?:\/\/[^"'\s>]+)?\/service\/home\/~?\/\?[^"'\s>]*part=([^&"'\s>]+)[^"'\s>]*/gi,
+        (_match, part) => {
+          return `/api/mailbox/attachments/${encodeURIComponent(summary.id)}/${encodeURIComponent(part)}`;
+        },
+      );
+    }
+
     return {
       ...summary,
       html,
@@ -635,6 +679,7 @@ export class MailboxService {
       filename: string;
       contentType: string;
       size: number;
+      contentId?: string;
     }>;
   } {
     let html = '';
@@ -644,6 +689,7 @@ export class MailboxService {
       filename: string;
       contentType: string;
       size: number;
+      contentId?: string;
     }> = [];
 
     const walk = (node: unknown) => {
@@ -658,6 +704,7 @@ export class MailboxService {
           content?: { _content?: string } | string;
           mp?: unknown;
           cd?: string;
+          ci?: string;
         };
         const ct = String(p.ct || '').toLowerCase();
         const content =
@@ -666,12 +713,25 @@ export class MailboxService {
             : String((p.content as { _content?: string })?._content || '');
         if (ct.includes('text/html') && content) html = content;
         else if (ct.includes('text/plain') && content && !text) text = content;
-        if (p.filename || p.cd === 'attachment' || (p.cd === 'inline' && p.filename)) {
+
+        const isImage = ct.startsWith('image/');
+        const isAttachment =
+          Boolean(p.filename) ||
+          p.cd === 'attachment' ||
+          p.cd === 'inline' ||
+          Boolean(p.ci) ||
+          isImage;
+
+        if (isAttachment && p.part && !ct.includes('text/html') && !ct.includes('text/plain')) {
+          const cleanCi = p.ci ? String(p.ci).replace(/^<|>$/g, '').trim() : undefined;
           attachments.push({
             part: String(p.part || ''),
-            filename: String(p.filename || `part-${p.part || 'x'}`),
+            filename: String(
+              p.filename || (cleanCi ? cleanCi : `image-${p.part}.${ct.split('/')[1] || 'png'}`),
+            ),
             contentType: String(p.ct || 'application/octet-stream'),
             size: Number(p.s || 0),
+            contentId: cleanCi,
           });
         }
         if (p.mp) walk(p.mp);

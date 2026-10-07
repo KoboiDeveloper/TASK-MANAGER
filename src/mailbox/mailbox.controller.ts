@@ -178,13 +178,18 @@ export class MailboxController {
     @Req() req: Request & { user?: AuthUser },
     @Param('messageId') messageId: string,
     @Param('part') part: string,
+    @Query('download') downloadQuery: string,
     @Res() res: Response,
   ) {
     try {
       const file = await this.mailbox.downloadAttachment(req.user!.nik, messageId, part);
-      res.setHeader('Content-Type', file.contentType);
+      res.setHeader('Content-Type', file.contentType || 'application/octet-stream');
+      const isInline = file.contentType?.startsWith('image/') || file.contentType?.startsWith('text/');
+      const disposition = downloadQuery === '1' || !isInline ? 'attachment' : 'inline';
       if (file.filename) {
-        res.setHeader('Content-Disposition', `attachment; filename="${file.filename}"`);
+        res.setHeader('Content-Disposition', `${disposition}; filename="${encodeURIComponent(file.filename)}"`);
+      } else {
+        res.setHeader('Content-Disposition', disposition);
       }
       res.send(file.buffer);
     } catch (e) {
