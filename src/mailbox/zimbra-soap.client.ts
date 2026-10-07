@@ -64,10 +64,16 @@ export class ZimbraSoapClient {
     authToken: string,
     file: Express.Multer.File,
   ): Promise<{ aid: string }> {
-    const url = `${this.getMailBaseUrl()}/service/upload?fmt=raw`;
+    // auth=qp: Node fetch sering membuang header Cookie (forbidden header).
+    const url =
+      `${this.getMailBaseUrl()}/service/upload?fmt=raw` +
+      `&auth=qp&zauthtoken=${encodeURIComponent(authToken)}`;
     const form = new FormData();
-    const blob = new Blob([new Uint8Array(file.buffer)], { type: file.mimetype || 'application/octet-stream' });
-    form.append('file', blob, file.originalname || 'file');
+    const blob = new Blob([new Uint8Array(file.buffer)], {
+      type: file.mimetype || 'application/octet-stream',
+    });
+    const filename = file.originalname || 'file';
+    form.append('file', blob, filename);
 
     const resp = await fetch(url, {
       method: 'POST',
@@ -75,24 +81,89 @@ export class ZimbraSoapClient {
         Cookie: `ZM_AUTH_TOKEN=${authToken}`,
       },
       body: form,
+      redirect: 'manual',
     });
     const text = await resp.text();
+    // 302/303 biasanya redirect ke login → auth token tidak diterima
+    if (resp.status >= 300 && resp.status < 400) {
+      this.logger.warn(`Zimbra upload redirected (${resp.status}) — kemungkinan auth gagal`);
+      throw new BadRequestException('Gagal upload lampiran ke Zimbra (auth)');
+    }
     if (!resp.ok) {
-      this.logger.warn(`Zimbra upload failed: ${resp.status} ${text.slice(0, 200)}`);
+      this.logger.warn(`Zimbra upload failed: ${resp.status} ${text.slice(0, 300)}`);
       throw new BadRequestException('Gagal upload lampiran ke Zimbra');
     }
-    // Response raw: "200,'null','aid','filename','ctype'"
-    const match = text.match(/'([0-9a-fA-F-]{8,})'/);
-    const aid =
-      match?.[1] ||
-      text
-        .split(',')
-        .map((s) => s.replace(/['"]/g, '').trim())
-        .find((s) => /^[0-9a-fA-F-]{8,}$/i.test(s));
+    const aid = this.parseUploadAid(text);
     if (!aid) {
+      this.logger.warn(`Zimbra upload no aid: status=${resp.status} body=${text.slice(0, 300)}`);
       throw new BadRequestException('Upload Zimbra tidak mengembalikan aid');
     }
     return { aid };
+  }
+
+  /** Parse raw upload body: `200,'null','aid','filename','ctype'` */
+  private parseUploadAid(raw: string): string | null {
+    const text = (raw || '').replace(/^\uFEFF/, '').trim();
+    if (!text || /<\s*html/i.test(text)) return null;
+
+    // Prefer quoted 3rd CSV field (aid)
+    const quoted = text.match(
+      /^\s*\d{3}\s*,\s*(?:'[^']*'|"[^"]*"|[^,]*)\s*,\s*(?:'([^']+)'|"([^"]+)"|([^,\r\n]+))/,
+    );
+    const fromQuoted = (quoted?.[1] || quoted?.[2] || quoted?.[3] || '').trim();
+    if (fromQuoted && !/^null$/i.test(fromQuoted)) return fromQuoted;
+
+    const parts = this.splitCsvFields(text);
+    if (parts.length >= 3) {
+      const status = parts[0];
+      const aid = parts[2];
+      if (/^\d{3}$/.test(status) && aid && !/^null$/i.test(aid)) return aid;
+    }
+
+    // Last resort: first UUID-ish / long hex token that isn't the filename
+    const tokens = parts.length ? parts : text.split(',').map((s) => s.replace(/^['"]|['"]$/g, '').trim());
+    const filenameHint = tokens[3] || '';
+    return (
+      tokens.find(
+        (s, i) =>
+          i >= 2 &&
+          s &&
+          !/^null$/i.test(s) &&
+          s !== filenameHint &&
+          !/\.(png|jpe?g|gif|webp|pdf|docx?|xlsx?|zip)$/i.test(s) &&
+          /^[0-9a-zA-Z_.:-]{6,}$/.test(s),
+      ) || null
+    );
+  }
+
+  private splitCsvFields(input: string): string[] {
+    const out: string[] = [];
+    let cur = '';
+    let quote: "'" | '"' | null = null;
+    for (let i = 0; i < input.length; i++) {
+      const ch = input[i];
+      if (quote) {
+        if (ch === quote) {
+          quote = null;
+        } else {
+          cur += ch;
+        }
+        continue;
+      }
+      if (ch === "'" || ch === '"') {
+        quote = ch;
+        continue;
+      }
+      if (ch === ',') {
+        out.push(cur.trim());
+        cur = '';
+        continue;
+      }
+      if (ch === '\n' || ch === '\r') break;
+      cur += ch;
+    }
+    if (cur.length || out.length) out.push(cur.trim());
+    return out;
   }
 
   async downloadContent(
