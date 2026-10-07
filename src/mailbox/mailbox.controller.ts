@@ -196,7 +196,7 @@ export class MailboxController {
           cb(null, `mailbox-up-${Date.now()}-${randomUUID()}${ext}`);
         },
       }),
-      // Dropbox large attachments up to 2GB (Zimbra path still capped in service at 25MB)
+      // Dropbox large attachments up to 2GB (Zimbra path still capped in service at 5MB)
       limits: { fileSize: 2 * 1024 * 1024 * 1024 },
     }),
   )

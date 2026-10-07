@@ -512,7 +512,7 @@ export class MailboxService {
   }
 
   /** Di atas threshold → Dropbox shared link (bukan attachment Zimbra). */
-  static readonly DROPBOX_THRESHOLD_BYTES = 25 * 1024 * 1024;
+  static readonly DROPBOX_THRESHOLD_BYTES = 5 * 1024 * 1024;
   /** Max via Dropbox (Zimbra tetap hanya file ≤ threshold). */
   static readonly MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024 * 1024;
 
