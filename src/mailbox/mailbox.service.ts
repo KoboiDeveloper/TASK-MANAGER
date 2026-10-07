@@ -10,6 +10,7 @@ import { MailboxCryptoService } from './mailbox-crypto.service';
 import { ZimbraSoapClient } from './zimbra-soap.client';
 import { DropboxStorageService } from '../storage/dropbox.storage.service';
 import { ConnectMailboxDto, MessageActionDto, SendMessageDto } from './dto/mailbox.dto';
+import { DROPBOX_GLYPH_CID, DROPBOX_GLYPH_PNG } from './dropbox-glyph';
 
 export type FolderNode = {
   id: string;
@@ -167,49 +168,87 @@ export class MailboxService {
     if (!this.splitAddrs(dto.to || '').length) {
       throw new BadRequestException('Tambahkan minimal satu penerima');
     }
-    const e = this.buildMimeEmail(dto);
-    const body = await this.withAuth(nik, (token) =>
-      this.zimbra.call(token, {
+    const body = await this.withAuth(nik, async (token) => {
+      const prepared = await this.attachDropboxGlyph(token, dto);
+      const e = this.buildMimeEmail(prepared.dto);
+      return this.zimbra.call(token, {
         SendMsgRequest: {
           _jsns: 'urn:zimbraMail',
           m: {
-            ...(dto.draftId ? { id: dto.draftId } : {}),
-            ...(dto.inReplyTo ? { origid: dto.inReplyTo, rt: 'r' } : {}),
+            ...(prepared.dto.draftId ? { id: prepared.dto.draftId } : {}),
+            ...(prepared.dto.inReplyTo ? { origid: prepared.dto.inReplyTo, rt: 'r' } : {}),
             e,
-            su: { _content: dto.subject || '' },
-            mp: this.buildBodyParts(dto),
-            ...this.buildAttachBlock(dto),
+            su: { _content: prepared.dto.subject || '' },
+            mp: this.buildBodyParts(prepared.dto),
+            ...this.buildAttachBlock(prepared.dto, prepared.glyphAid),
           },
         },
-      }),
-    );
+      });
+    });
     return { ok: true, raw: (body as { SendMsgResponse?: unknown }).SendMsgResponse };
   }
 
   async saveDraft(nik: string, dto: SendMessageDto) {
-    const e = this.buildMimeEmail(dto);
-    const body = await this.withAuth(nik, (token) =>
-      this.zimbra.call(token, {
+    const body = await this.withAuth(nik, async (token) => {
+      const prepared = await this.attachDropboxGlyph(token, dto);
+      const e = this.buildMimeEmail(prepared.dto);
+      return this.zimbra.call(token, {
         SaveDraftRequest: {
           _jsns: 'urn:zimbraMail',
           m: {
-            ...(dto.draftId ? { id: dto.draftId } : {}),
+            ...(prepared.dto.draftId ? { id: prepared.dto.draftId } : {}),
             e,
-            su: { _content: dto.subject || '' },
-            mp: this.buildBodyParts(dto),
-            ...this.buildAttachBlock(dto),
+            su: { _content: prepared.dto.subject || '' },
+            mp: this.buildBodyParts(prepared.dto),
+            ...this.buildAttachBlock(prepared.dto, prepared.glyphAid),
           },
         },
-      }),
-    );
+      });
+    });
     const draft = this.asArray(
       (body as { SaveDraftResponse?: { m?: unknown } }).SaveDraftResponse?.m,
     )[0] as { id?: string } | undefined;
     return { ok: true, id: draft?.id || null };
   }
 
-  /** Gabungkan aid baru + part lampiran yang sudah ada di draf. */
-  private buildAttachBlock(dto: SendMessageDto): { attach: Record<string, unknown> } | Record<string, never> {
+  /**
+   * Logo kartu Dropbox sebagai part inline (cid).
+   * Gmail membuang `data:` URI, jadi glyph harus jadi MIME, bukan src data.
+   */
+  private async attachDropboxGlyph(
+    token: string,
+    dto: SendMessageDto,
+  ): Promise<{ dto: SendMessageDto; glyphAid?: string }> {
+    const html = dto.bodyHtml || '';
+    const cid = `cid:${DROPBOX_GLYPH_CID}`;
+    if (!html.includes(cid)) return { dto };
+    try {
+      const { aid } = await this.zimbra.uploadAttachment(token, {
+        buffer: DROPBOX_GLYPH_PNG,
+        mimetype: 'image/png',
+        originalname: 'dropbox-glyph.png',
+        size: DROPBOX_GLYPH_PNG.length,
+      } as Express.Multer.File);
+      return { dto, glyphAid: aid };
+    } catch (e) {
+      this.logger.warn(`Logo Dropbox tidak terlampir: ${(e as Error).message}`);
+      return {
+        dto: {
+          ...dto,
+          bodyHtml: html.replace(
+            /<img\b[^>]*\bsrc=(["'])cid:dropbox-glyph@taskmanager\1[^>]*>/gi,
+            '',
+          ),
+        },
+      };
+    }
+  }
+
+  /** Gabungkan aid baru + part lampiran yang sudah ada di draf + logo inline. */
+  private buildAttachBlock(
+    dto: SendMessageDto,
+    glyphAid?: string,
+  ): { attach: Record<string, unknown> } | Record<string, never> {
     const aids = (dto.attachmentAids || '')
       .split(',')
       .map((s) => s.trim())
@@ -218,11 +257,20 @@ export class MailboxService {
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean);
+    const mp: Record<string, unknown>[] = [];
+    if (parts.length && dto.draftId) {
+      for (const part of parts) mp.push({ mid: dto.draftId, part });
+    }
+    if (glyphAid) {
+      mp.push({
+        aid: glyphAid,
+        ci: `<${DROPBOX_GLYPH_CID}>`,
+        cd: 'inline',
+      });
+    }
     const attach: Record<string, unknown> = {};
     if (aids.length) attach.aid = aids.join(',');
-    if (parts.length && dto.draftId) {
-      attach.mp = parts.map((part) => ({ mid: dto.draftId, part }));
-    }
+    if (mp.length) attach.mp = mp;
     if (!Object.keys(attach).length) return {};
     return { attach };
   }
@@ -901,11 +949,15 @@ export class MailboxService {
       );
     }
 
+    const visibleAttachments = attachments.filter(
+      (a) => a.contentId !== DROPBOX_GLYPH_CID,
+    );
+
     return {
       ...summary,
       html,
       text,
-      attachments,
+      attachments: visibleAttachments,
       messageId: m.mid || null,
       conversationId: m.cid || null,
       inReplyTo: m.irt || null,
