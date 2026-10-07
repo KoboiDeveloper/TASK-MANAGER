@@ -1,0 +1,683 @@
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
+import { randomUUID } from 'crypto';
+import { PrismaService } from '../prisma/prisma.service';
+import { MailboxCryptoService } from './mailbox-crypto.service';
+import { ZimbraSoapClient } from './zimbra-soap.client';
+import { DropboxStorageService } from '../storage/dropbox.storage.service';
+import { ConnectMailboxDto, MessageActionDto, SendMessageDto } from './dto/mailbox.dto';
+
+export type FolderNode = {
+  id: string;
+  name: string;
+  path: string;
+  absFolderPath?: string;
+  u?: number;
+  n?: number;
+  view?: string;
+  children: FolderNode[];
+};
+
+export type MessageSummary = {
+  id: string;
+  subject: string;
+  from: string;
+  to: string;
+  cc: string;
+  date: number;
+  fragment: string;
+  size: number;
+  flags: string;
+  isUnread: boolean;
+  isFlagged: boolean;
+  hasAttachment: boolean;
+  folderId?: string;
+  tags?: string[];
+};
+
+@Injectable()
+export class MailboxService {
+  private readonly logger = new Logger(MailboxService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly crypto: MailboxCryptoService,
+    private readonly zimbra: ZimbraSoapClient,
+    private readonly dropbox: DropboxStorageService,
+  ) {}
+
+  async getStatus(nik: string) {
+    const cred = await this.prisma.dT_MAILBOX_CREDENTIAL.findUnique({ where: { nik } });
+    return {
+      connected: !!cred,
+      email: cred?.zimbraEmail ?? null,
+      updatedAt: cred?.updatedAt?.toISOString() ?? null,
+    };
+  }
+
+  async connect(nik: string, dto: ConnectMailboxDto) {
+    const email = dto.email.trim().toLowerCase();
+    const { authToken, lifetimeMs } = await this.zimbra.auth(email, dto.password);
+    const enc = this.crypto.encrypt(dto.password);
+    const expires = new Date(Date.now() + Math.max(lifetimeMs - 60_000, 5 * 60_000));
+
+    await this.prisma.dT_MAILBOX_CREDENTIAL.upsert({
+      where: { nik },
+      create: {
+        nik,
+        zimbraEmail: email,
+        passwordCipher: enc.cipher,
+        passwordIv: enc.iv,
+        passwordTag: enc.tag,
+        authToken,
+        authTokenExpiresAt: expires,
+      },
+      update: {
+        zimbraEmail: email,
+        passwordCipher: enc.cipher,
+        passwordIv: enc.iv,
+        passwordTag: enc.tag,
+        authToken,
+        authTokenExpiresAt: expires,
+      },
+    });
+
+    return { connected: true, email };
+  }
+
+  async disconnect(nik: string) {
+    await this.prisma.dT_MAILBOX_CREDENTIAL.deleteMany({ where: { nik } });
+    return { connected: false };
+  }
+
+  async getFolders(nik: string): Promise<FolderNode[]> {
+    const body = await this.withAuth(nik, (token) =>
+      this.zimbra.call(token, {
+        GetFolderRequest: {
+          _jsns: 'urn:zimbraMail',
+        },
+      }),
+    );
+    const root = (body as { GetFolderResponse?: { folder?: unknown } }).GetFolderResponse?.folder;
+    const folders = this.asArray(root).map((f) => this.mapFolder(f));
+    return this.mailFoldersOnly(folders);
+  }
+
+  async searchMessages(
+    nik: string,
+    opts: { folderId?: string; query?: string; offset?: number; limit?: number },
+  ): Promise<{ messages: MessageSummary[]; more: boolean; offset: number }> {
+    const limit = Math.min(Math.max(opts.limit ?? 50, 1), 100);
+    const offset = Math.max(opts.offset ?? 0, 0);
+    const parts: string[] = [];
+    if (opts.folderId) parts.push(`inid:${opts.folderId}`);
+    if (opts.query?.trim()) parts.push(opts.query.trim());
+    const query = parts.length ? parts.join(' ') : 'in:inbox';
+
+    const body = await this.withAuth(nik, (token) =>
+      this.zimbra.call(token, {
+        SearchRequest: {
+          _jsns: 'urn:zimbraMail',
+          types: 'message',
+          sortBy: 'dateDesc',
+          limit,
+          offset,
+          query,
+          fetch: 'none',
+        },
+      }),
+    );
+
+    const resp = (body as { SearchResponse?: { m?: unknown; more?: boolean | string } })
+      .SearchResponse;
+    const messages = this.asArray(resp?.m).map((m) => this.mapMessageSummary(m));
+    return {
+      messages,
+      more: resp?.more === true || resp?.more === '1',
+      offset,
+    };
+  }
+
+  async getMessage(nik: string, id: string) {
+    const body = await this.withAuth(nik, (token) =>
+      this.zimbra.call(token, {
+        GetMsgRequest: {
+          _jsns: 'urn:zimbraMail',
+          m: { id, html: 1, needExp: 1, max: 250000 },
+        },
+      }),
+    );
+    const msg = this.asArray(
+      (body as { GetMsgResponse?: { m?: unknown } }).GetMsgResponse?.m,
+    )[0];
+    if (!msg) throw new NotFoundException('Pesan tidak ditemukan');
+    return this.mapMessageDetail(msg);
+  }
+
+  async sendMessage(nik: string, dto: SendMessageDto) {
+    const e = this.buildMimeEmail(dto);
+    const body = await this.withAuth(nik, (token) =>
+      this.zimbra.call(token, {
+        SendMsgRequest: {
+          _jsns: 'urn:zimbraMail',
+          m: {
+            ...(dto.draftId ? { id: dto.draftId } : {}),
+            ...(dto.inReplyTo ? { origid: dto.inReplyTo, rt: 'r' } : {}),
+            e,
+            su: { _content: dto.subject || '' },
+            mp: this.buildBodyParts(dto),
+            ...(dto.attachmentAids
+              ? {
+                  attach: {
+                    aid: dto.attachmentAids
+                      .split(',')
+                      .map((s) => s.trim())
+                      .filter(Boolean)
+                      .join(','),
+                  },
+                }
+              : {}),
+          },
+        },
+      }),
+    );
+    return { ok: true, raw: (body as { SendMsgResponse?: unknown }).SendMsgResponse };
+  }
+
+  async saveDraft(nik: string, dto: SendMessageDto) {
+    const e = this.buildMimeEmail(dto);
+    const body = await this.withAuth(nik, (token) =>
+      this.zimbra.call(token, {
+        SaveDraftRequest: {
+          _jsns: 'urn:zimbraMail',
+          m: {
+            ...(dto.draftId ? { id: dto.draftId } : {}),
+            e,
+            su: { _content: dto.subject || '' },
+            mp: this.buildBodyParts(dto),
+            ...(dto.attachmentAids
+              ? {
+                  attach: {
+                    aid: dto.attachmentAids
+                      .split(',')
+                      .map((s) => s.trim())
+                      .filter(Boolean)
+                      .join(','),
+                  },
+                }
+              : {}),
+          },
+        },
+      }),
+    );
+    const draft = this.asArray(
+      (body as { SaveDraftResponse?: { m?: unknown } }).SaveDraftResponse?.m,
+    )[0] as { id?: string } | undefined;
+    return { ok: true, id: draft?.id || null };
+  }
+
+  async messageAction(nik: string, id: string, dto: MessageActionDto) {
+    const OPS: Record<string, string> = {
+      read: 'read',
+      unread: '!read',
+      '!read': '!read',
+      flag: 'flag',
+      unflag: '!flag',
+      '!flag': '!flag',
+      trash: 'trash',
+      spam: 'spam',
+      unspam: '!spam',
+      move: 'move',
+      delete: 'delete',
+      tag: 'tag',
+      untag: '!tag',
+      '!tag': '!tag',
+    };
+    const op = OPS[dto.op];
+    if (!op) throw new BadRequestException(`Operasi tidak dikenal: ${dto.op}`);
+    const action: Record<string, unknown> = { id, op };
+    if (dto.folderId) action.l = dto.folderId;
+    if (dto.tagName) action.tn = dto.tagName;
+
+    await this.withAuth(nik, (token) =>
+      this.zimbra.call(token, {
+        MsgActionRequest: {
+          _jsns: 'urn:zimbraMail',
+          action,
+        },
+      }),
+    );
+    return { ok: true };
+  }
+
+  async getTags(nik: string) {
+    const body = await this.withAuth(nik, (token) =>
+      this.zimbra.call(token, {
+        GetTagRequest: { _jsns: 'urn:zimbraMail' },
+      }),
+    );
+    const tags = this.asArray(
+      (body as { GetTagResponse?: { tag?: unknown } }).GetTagResponse?.tag,
+    );
+    return tags.map((t) => {
+      const o = t as { id?: string; name?: string; color?: string | number };
+      return { id: String(o.id || ''), name: String(o.name || ''), color: o.color ?? null };
+    });
+  }
+
+  async autocomplete(nik: string, q: string) {
+    const name = (q || '').trim();
+    if (name.length < 1) return [];
+    const seen = new Set<string>();
+    const out: Array<{ email: string; name: string; type: string }> = [];
+
+    const pushMatch = (emailRaw: string, display: string, type: string) => {
+      const parsed = this.parseAddress(emailRaw);
+      const email = parsed.email;
+      if (!email || !email.includes('@')) return;
+      const key = email.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push({
+        email,
+        name: display || parsed.name || email.split('@')[0],
+        type: type || 'contact',
+      });
+    };
+
+    const body = await this.withAuth(nik, (token) =>
+      this.zimbra.call(token, {
+        AutoCompleteRequest: {
+          _jsns: 'urn:zimbraMail',
+          name,
+          includeGal: '1',
+          needExp: '1',
+        },
+      }),
+    );
+    const matches = this.asArray(
+      (body as { AutoCompleteResponse?: { match?: unknown } }).AutoCompleteResponse?.match,
+    );
+    for (const raw of matches) {
+      const m = raw as {
+        email?: string;
+        full?: string;
+        first?: string;
+        last?: string;
+        display?: string;
+        type?: string;
+      };
+      pushMatch(
+        m.email || '',
+        m.full || m.display || [m.first, m.last].filter(Boolean).join(' '),
+        m.type || 'contact',
+      );
+    }
+
+    if (out.length < 5) {
+      try {
+        const gal = await this.withAuth(nik, (token) =>
+          this.zimbra.call(token, {
+            SearchGalRequest: {
+              _jsns: 'urn:zimbraAccount',
+              name,
+              type: 'account',
+              limit: 8,
+            },
+          }),
+        );
+        const cns = this.asArray(
+          (gal as { SearchGalResponse?: { cn?: unknown } }).SearchGalResponse?.cn,
+        );
+        for (const raw of cns) {
+          const cn = raw as {
+            _attrs?: {
+              email?: string;
+              email2?: string;
+              fullName?: string;
+              firstName?: string;
+              lastName?: string;
+              displayName?: string;
+            };
+          };
+          const a = cn._attrs || {};
+          const addr = a.email || a.email2 || '';
+          const display =
+            a.fullName || a.displayName || [a.firstName, a.lastName].filter(Boolean).join(' ');
+          pushMatch(addr, display, 'gal');
+        }
+      } catch {
+        /* GAL optional */
+      }
+    }
+
+    return out.slice(0, 12);
+  }
+
+  private parseAddress(raw: string): { name: string; email: string } {
+    const angle = raw.match(/^\s*"?([^"<]*?)"?\s*<([^>]+)>\s*$/);
+    if (angle) return { name: angle[1].trim(), email: angle[2].trim() };
+    return { name: '', email: raw.trim() };
+  }
+
+  async uploadAttachment(nik: string, file: Express.Multer.File) {
+    if (!file) throw new BadRequestException('File wajib');
+    const DROPBOX_THRESHOLD = 5 * 1024 * 1024;
+    const MAX_SIZE = 100 * 1024 * 1024;
+    if (file.size > MAX_SIZE) {
+      throw new BadRequestException('Lampiran maksimal 100MB');
+    }
+
+    const filename = file.originalname || 'file';
+    if (file.size > DROPBOX_THRESHOLD) {
+      const safeName = filename.replace(/[^\w.\- ()[\]]+/g, '_').slice(0, 180);
+      const path = `mailbox/${nik.trim()}/${Date.now()}-${randomUUID().slice(0, 8)}-${safeName}`;
+      const uploaded = await this.dropbox.uploadFile(
+        path,
+        file.buffer,
+        file.mimetype || 'application/octet-stream',
+      );
+      return {
+        via: 'dropbox' as const,
+        url: this.toDropboxDownloadUrl(uploaded.url),
+        filename,
+        size: file.size,
+      };
+    }
+
+    const zimbra = await this.withAuth(nik, (token) => this.zimbra.uploadAttachment(token, file));
+    return {
+      via: 'zimbra' as const,
+      aid: zimbra.aid,
+      filename,
+      size: file.size,
+    };
+  }
+
+  private toDropboxDownloadUrl(url: string): string {
+    try {
+      const u = new URL(url);
+      u.searchParams.delete('raw');
+      u.searchParams.set('dl', '1');
+      return u.toString();
+    } catch {
+      return url.includes('dl=') ? url.replace(/dl=0/, 'dl=1') : `${url}${url.includes('?') ? '&' : '?'}dl=1`;
+    }
+  }
+
+  async downloadAttachment(nik: string, messageId: string, part: string) {
+    const path = `/service/home/~/?auth=co&id=${encodeURIComponent(messageId)}&part=${encodeURIComponent(part)}`;
+    return this.withAuth(nik, (token) => this.zimbra.downloadContent(token, path));
+  }
+
+  private async withAuth<T>(nik: string, fn: (token: string) => Promise<T>): Promise<T> {
+    const cred = await this.prisma.dT_MAILBOX_CREDENTIAL.findUnique({ where: { nik } });
+    if (!cred) throw new BadRequestException('Mailbox belum terhubung. Hubungkan akun Zimbra dulu.');
+
+    let token = cred.authToken;
+    const expired =
+      !token ||
+      !cred.authTokenExpiresAt ||
+      cred.authTokenExpiresAt.getTime() < Date.now() + 30_000;
+
+    if (expired) {
+      token = await this.refreshAuth(cred);
+    }
+
+    try {
+      return await fn(token!);
+    } catch (e) {
+      const msg = (e as Error).message || '';
+      const authish =
+        /auth|expired|session|not authenticated|no such|invalid/i.test(msg) ||
+        (e as { zimbraFault?: boolean }).zimbraFault;
+      if (!authish) throw e;
+      this.logger.debug(`Re-auth after fault for ${nik}: ${msg}`);
+      token = await this.refreshAuth(cred);
+      return fn(token);
+    }
+  }
+
+  private async refreshAuth(cred: {
+    nik: string;
+    zimbraEmail: string;
+    passwordCipher: string;
+    passwordIv: string;
+    passwordTag: string;
+  }): Promise<string> {
+    const password = this.crypto.decrypt({
+      cipher: cred.passwordCipher,
+      iv: cred.passwordIv,
+      tag: cred.passwordTag,
+    });
+    const { authToken, lifetimeMs } = await this.zimbra.auth(cred.zimbraEmail, password);
+    const expires = new Date(Date.now() + Math.max(lifetimeMs - 60_000, 5 * 60_000));
+    await this.prisma.dT_MAILBOX_CREDENTIAL.update({
+      where: { nik: cred.nik },
+      data: { authToken, authTokenExpiresAt: expires },
+    });
+    return authToken;
+  }
+
+  private buildMimeEmail(dto: SendMessageDto) {
+    const e: Array<{ t: string; a: string; p?: string }> = [];
+    const push = (t: string, raw: string) => {
+      const m = raw.match(/^\s*"?([^"<]*?)"?\s*<([^>]+)>\s*$/);
+      if (m) e.push({ t, a: m[2].trim(), ...(m[1].trim() ? { p: m[1].trim() } : {}) });
+      else e.push({ t, a: raw });
+    };
+    for (const addr of this.splitAddrs(dto.to)) push('t', addr);
+    for (const addr of this.splitAddrs(dto.cc || '')) push('c', addr);
+    for (const addr of this.splitAddrs(dto.bcc || '')) push('b', addr);
+    return e;
+  }
+
+  private buildBodyParts(dto: SendMessageDto) {
+    const html = dto.bodyHtml?.trim();
+    const text = dto.bodyText?.trim() || this.stripHtml(html || '');
+    if (html) {
+      return {
+        ct: 'multipart/alternative',
+        mp: [
+          { ct: 'text/plain', content: { _content: text } },
+          { ct: 'text/html', content: { _content: html } },
+        ],
+      };
+    }
+    return { ct: 'text/plain', content: { _content: text } };
+  }
+
+  private splitAddrs(raw: string): string[] {
+    return raw
+      .split(/[,;]/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+
+  private stripHtml(html: string): string {
+    return html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+
+  private asArray(v: unknown): unknown[] {
+    if (!v) return [];
+    return Array.isArray(v) ? v : [v];
+  }
+
+  private mailFoldersOnly(nodes: FolderNode[]): FolderNode[] {
+    const top: FolderNode[] = [];
+    for (const n of nodes) {
+      if (n.id === '1' || n.name === 'USER_ROOT') top.push(...(n.children || []));
+      else top.push(n);
+    }
+    const filter = (list: FolderNode[]): FolderNode[] =>
+      list
+        .filter((f) => this.isMailFolder(f))
+        .map((f) => ({ ...f, children: filter(f.children || []) }));
+    return filter(top);
+  }
+
+  private isMailFolder(f: FolderNode): boolean {
+    const nonMailIds = new Set(['1', '7', '10', '13', '14', '15', '16']);
+    const nonMailViews = new Set([
+      'contact',
+      'appointment',
+      'task',
+      'document',
+      'wiki',
+      'comment',
+      'chat',
+    ]);
+    const nonMailNames = new Set([
+      'user_root',
+      'calendar',
+      'contacts',
+      'emailed contacts',
+      'chats',
+      'tasks',
+      'briefcase',
+      'comments',
+    ]);
+    if (nonMailIds.has(f.id)) return false;
+    if (f.view && nonMailViews.has(f.view)) return false;
+    if (nonMailNames.has(f.name.toLowerCase())) return false;
+    return true;
+  }
+
+  private mapFolder(raw: unknown): FolderNode {
+    const f = raw as {
+      id?: string;
+      name?: string;
+      absFolderPath?: string;
+      path?: string;
+      u?: number | string;
+      n?: number | string;
+      view?: string;
+      folder?: unknown;
+    };
+    return {
+      id: String(f.id || ''),
+      name: String(f.name || ''),
+      path: String(f.absFolderPath || f.path || f.name || ''),
+      absFolderPath: f.absFolderPath,
+      u: Number(f.u || 0),
+      n: Number(f.n || 0),
+      view: f.view,
+      children: this.asArray(f.folder).map((c) => this.mapFolder(c)),
+    };
+  }
+
+  private mapMessageSummary(raw: unknown): MessageSummary {
+    const m = raw as {
+      id?: string;
+      su?: string;
+      fr?: string;
+      d?: number | string;
+      s?: number | string;
+      f?: string;
+      l?: string;
+      e?: unknown;
+      tn?: string;
+    };
+    const emails = this.asArray(m.e) as Array<{ t?: string; a?: string; p?: string; d?: string }>;
+    const from = emails.find((e) => e.t === 'f');
+    const fmt = (e: { a?: string; p?: string; d?: string }) =>
+      e.p || e.d ? `${(e.p || e.d || '').replace(/[,<>"]/g, ' ').trim()} <${e.a || ''}>` : e.a || '';
+    const to = emails.filter((e) => e.t === 't');
+    const cc = emails.filter((e) => e.t === 'c');
+    const flags = String(m.f || '');
+    return {
+      id: String(m.id || ''),
+      subject: String(m.su || '(tanpa subjek)'),
+      from: from ? `${from.p || from.d || ''} <${from.a || ''}>`.trim() : '',
+      to: to.map(fmt).join(', '),
+      cc: cc.map(fmt).join(', '),
+      date: Number(m.d || 0),
+      fragment: String(m.fr || ''),
+      size: Number(m.s || 0),
+      flags,
+      isUnread: flags.includes('u'),
+      isFlagged: flags.includes('f'),
+      hasAttachment: flags.includes('a'),
+      folderId: m.l ? String(m.l) : undefined,
+      tags: m.tn ? String(m.tn).split(',').filter(Boolean) : [],
+    };
+  }
+
+  private mapMessageDetail(raw: unknown) {
+    const summary = this.mapMessageSummary(raw);
+    const m = raw as {
+      mp?: unknown;
+      mid?: string;
+      cid?: string;
+      irt?: string;
+    };
+    const { html, text, attachments } = this.extractParts(m.mp);
+    return {
+      ...summary,
+      html,
+      text,
+      attachments,
+      messageId: m.mid || null,
+      conversationId: m.cid || null,
+      inReplyTo: m.irt || null,
+    };
+  }
+
+  private extractParts(mp: unknown): {
+    html: string;
+    text: string;
+    attachments: Array<{
+      part: string;
+      filename: string;
+      contentType: string;
+      size: number;
+    }>;
+  } {
+    let html = '';
+    let text = '';
+    const attachments: Array<{
+      part: string;
+      filename: string;
+      contentType: string;
+      size: number;
+    }> = [];
+
+    const walk = (node: unknown) => {
+      if (!node) return;
+      for (const part of this.asArray(node)) {
+        const p = part as {
+          ct?: string;
+          part?: string;
+          filename?: string;
+          s?: number | string;
+          body?: boolean | string;
+          content?: { _content?: string } | string;
+          mp?: unknown;
+          cd?: string;
+        };
+        const ct = String(p.ct || '').toLowerCase();
+        const content =
+          typeof p.content === 'string'
+            ? p.content
+            : String((p.content as { _content?: string })?._content || '');
+        if (ct.includes('text/html') && content) html = content;
+        else if (ct.includes('text/plain') && content && !text) text = content;
+        if (p.filename || p.cd === 'attachment' || (p.cd === 'inline' && p.filename)) {
+          attachments.push({
+            part: String(p.part || ''),
+            filename: String(p.filename || `part-${p.part || 'x'}`),
+            contentType: String(p.ct || 'application/octet-stream'),
+            size: Number(p.s || 0),
+          });
+        }
+        if (p.mp) walk(p.mp);
+      }
+    };
+    walk(mp);
+    return { html, text, attachments };
+  }
+}

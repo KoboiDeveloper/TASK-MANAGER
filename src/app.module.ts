@@ -11,6 +11,7 @@ import { TicketModule } from './ticket/ticket.module';
 import { ProjectModule } from './project/project.module';
 import { CronjobModule } from './utils/cronjob/cronjob.module';
 import { ScheduleModule } from '@nestjs/schedule';
+import { MailboxModule } from './mailbox/mailbox.module';
 import { ChatModule } from './chat/chat.module';
 import { NotificationsModule } from './notifications/notifications.module';
 @Module({
@@ -29,6 +30,7 @@ import { NotificationsModule } from './notifications/notifications.module';
     ProjectModule,
     ChatModule,
     CronjobModule,
+    MailboxModule,
     NotificationsModule,
   ],
   controllers: [AppController],
