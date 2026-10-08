@@ -37,6 +37,8 @@ model DT_USER {
   receivedInvites    LOG_INVITATION_PROJECT[] @relation("ReceiverInvites")
   refreshTokens      LOG_REFRESH_TOKEN[]
   mailboxCredentials DT_MAILBOX_CREDENTIAL[]
+  googleCalendarCredentials DT_GOOGLE_CALENDAR_CREDENTIAL[]
+  zimbraGoogleEventSyncs DT_ZIMBRA_GOOGLE_EVENT_SYNC[]
   chatMemberships    DT_CHAT_MEMBER[]
   chatRoomsCreated   DT_CHAT_ROOM[]           @relation("ChatRoomsCreated")
   pushSubscriptions  DT_PUSH_SUBSCRIPTION[]
@@ -488,3 +490,48 @@ model DT_MAILBOX_CREDENTIAL {
   @@unique([nik, zimbraEmail])
   @@index([nik])
 }
+
+model DT_GOOGLE_CALENDAR_CREDENTIAL {
+  id                   String    @id @db.VarChar(36)
+  nik                  String    @db.Char(8)
+  googleEmail          String    @db.NVarChar(255)
+  displayName          String?   @db.NVarChar(255)
+  accessTokenCipher    String    @db.NVarChar(Max)
+  accessTokenIv        String    @db.VarChar(64)
+  accessTokenTag       String    @db.VarChar(64)
+  refreshTokenCipher   String    @db.NVarChar(Max)
+  refreshTokenIv       String    @db.VarChar(64)
+  refreshTokenTag      String    @db.VarChar(64)
+  accessTokenExpiresAt DateTime?
+  scope                String?   @db.NVarChar(512)
+  updatedAt            DateTime  @updatedAt
+  createdAt            DateTime  @default(now())
+
+  user DT_USER @relation(fields: [nik], references: [nik], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([nik, googleEmail])
+  @@index([nik])
+}
+
+model DT_ZIMBRA_GOOGLE_EVENT_SYNC {
+  id               String   @id @db.VarChar(36)
+  nik              String   @db.Char(8)
+  zimbraEmail      String   @db.NVarChar(255)
+  zimbraEventKey   String   @db.NVarChar(255)
+  googleEmail      String   @db.NVarChar(255)
+  googleCalendarId String   @db.NVarChar(255)
+  googleEventId    String   @db.NVarChar(255)
+  title            String   @db.NVarChar(500)
+  startMs          BigInt
+  endMs            BigInt
+  allDay           Boolean  @default(false)
+  updatedAt        DateTime @updatedAt
+  createdAt        DateTime @default(now())
+
+  user DT_USER @relation(fields: [nik], references: [nik], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([nik, zimbraEmail, zimbraEventKey])
+  @@index([nik, googleEmail])
+  @@index([nik, startMs, endMs])
+}
+

@@ -30,6 +30,6 @@ import { ZimbraSoapClient } from './zimbra-soap.client';
   ],
   controllers: [MailboxController],
   providers: [MailboxService, MailboxCryptoService, ZimbraSoapClient],
-  exports: [MailboxService],
+  exports: [MailboxService, MailboxCryptoService],
 })
 export class MailboxModule {}

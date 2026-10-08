@@ -1,4 +1,4 @@
-import { IsEmail, IsOptional, IsString, MinLength } from 'class-validator';
+import { IsBoolean, IsEmail, IsNumber, IsOptional, IsString, MinLength } from 'class-validator';
 
 export class ConnectMailboxDto {
   @IsEmail()
@@ -87,4 +87,50 @@ export class SaveSignatureDto {
   /** HTML signature (Zimbra text/html) */
   @IsString()
   html: string;
+}
+
+export class CreateMailboxEventDto {
+  @IsString()
+  @MinLength(1)
+  title: string;
+
+  @IsOptional()
+  @IsString()
+  location?: string;
+
+  @IsOptional()
+  @IsString()
+  description?: string;
+
+  @IsNumber()
+  start: number;
+
+  @IsNumber()
+  end: number;
+
+  @IsOptional()
+  @IsBoolean()
+  allDay?: boolean;
+
+  /** event | appointment */
+  @IsOptional()
+  @IsString()
+  kind?: string;
+
+  /** comma-separated guest emails */
+  @IsOptional()
+  @IsString()
+  guests?: string;
+
+  @IsOptional()
+  @IsString()
+  timeZone?: string;
+
+  @IsOptional()
+  @IsString()
+  email?: string;
+
+  @IsOptional()
+  @IsString()
+  folderId?: string;
 }

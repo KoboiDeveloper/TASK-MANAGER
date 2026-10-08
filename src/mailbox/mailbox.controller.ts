@@ -32,6 +32,7 @@ import {
   SaveSignatureDto,
   SendMessageDto,
   SetActiveMailboxDto,
+  CreateMailboxEventDto,
 } from './dto/mailbox.dto';
 import { MulterExceptionFilter } from './multer-exception.filter';
 
@@ -86,6 +87,53 @@ export class MailboxController {
     try {
       const data = await this.mailbox.setActive(req.user!.nik, dto.email);
       return new CommonResponse('Active mailbox updated', HttpStatus.OK, data);
+    } catch (e) {
+      return handleException(e);
+    }
+  }
+
+
+  @Get('calendars')
+  async calendars(@Req() req: Request & { user?: AuthUser }) {
+    try {
+      const data = await this.mailbox.getCalendars(req.user!.nik);
+      return new CommonResponse('Calendars', HttpStatus.OK, data);
+    } catch (e) {
+      return handleException(e);
+    }
+  }
+
+  @Get('events')
+  async events(
+    @Req() req: Request & { user?: AuthUser },
+    @Query('start') start?: string,
+    @Query('end') end?: string,
+    @Query('folderId') folderId?: string,
+  ) {
+    try {
+      if (!start || !end) {
+        throw new BadRequestException('Query start dan end (epoch ms) wajib');
+      }
+      const data = await this.mailbox.getEvents(req.user!.nik, {
+        start: Number(start),
+        end: Number(end),
+        folderId,
+      });
+      return new CommonResponse('Events', HttpStatus.OK, data);
+    } catch (e) {
+      return handleException(e);
+    }
+  }
+
+
+  @Post('events')
+  async createEvent(
+    @Req() req: Request & { user?: AuthUser },
+    @Body() dto: CreateMailboxEventDto,
+  ) {
+    try {
+      const data = await this.mailbox.createEvent(req.user!.nik, dto);
+      return new CommonResponse('Event created', HttpStatus.OK, data);
     } catch (e) {
       return handleException(e);
     }

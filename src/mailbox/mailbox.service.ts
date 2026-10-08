@@ -31,6 +31,18 @@ export type FolderNode = {
   children: FolderNode[];
 };
 
+export type CalendarEvent = {
+  id: string;
+  appointmentId: string;
+  title: string;
+  location: string | null;
+  start: number;
+  end: number;
+  allDay: boolean;
+  folderId?: string;
+  fragment?: string;
+};
+
 export type MessageSummary = {
   id: string;
   subject: string;
@@ -226,6 +238,218 @@ export class MailboxService {
     const root = (body as { GetFolderResponse?: { folder?: unknown } }).GetFolderResponse?.folder;
     const folders = this.asArray(root).map((f) => this.mapFolder(f));
     return this.mailFoldersOnly(folders);
+  }
+
+  async getCalendars(nik: string): Promise<FolderNode[]> {
+    const body = await this.withAuth(nik, (token) =>
+      this.zimbra.call(token, {
+        GetFolderRequest: {
+          _jsns: 'urn:zimbraMail',
+        },
+      }),
+    );
+    const root = (body as { GetFolderResponse?: { folder?: unknown } }).GetFolderResponse?.folder;
+    const folders = this.asArray(root).map((f) => this.mapFolder(f));
+    return this.calendarFoldersOnly(folders);
+  }
+
+
+  async createEvent(
+    nik: string,
+    input: {
+      title: string;
+      location?: string;
+      description?: string;
+      start: number;
+      end: number;
+      allDay?: boolean;
+      kind?: string;
+      guests?: string;
+      timeZone?: string;
+      email?: string;
+      folderId?: string;
+    },
+  ): Promise<CalendarEvent> {
+    const title = (input.title || '').trim();
+    if (!title) throw new BadRequestException('Judul wajib');
+    if (!Number.isFinite(input.start) || !Number.isFinite(input.end) || input.end <= input.start) {
+      throw new BadRequestException('Range waktu tidak valid');
+    }
+
+    const cred = await this.resolveCredential(nik, input.email);
+    const zimbraEmail = cred.zimbraEmail;
+    const tz = (input.timeZone || '').trim() || 'Asia/Jakarta';
+    const allDay = !!input.allDay;
+    const folderId = (input.folderId || '10').trim() || '10';
+    const kind = (input.kind || 'event').trim().toLowerCase();
+    const guests = (input.guests || '')
+      .split(/[,;\s]+/)
+      .map((g) => g.trim().toLowerCase())
+      .filter((g) => g.includes('@'));
+
+    const fmtZimbra = (ms: number, dayOnly: boolean) => {
+      const d = new Date(ms);
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      if (dayOnly) return `${y}${m}${day}`;
+      const hh = String(d.getHours()).padStart(2, '0');
+      const mm = String(d.getMinutes()).padStart(2, '0');
+      const ss = String(d.getSeconds()).padStart(2, '0');
+      return `${y}${m}${day}T${hh}${mm}${ss}`;
+    };
+
+    const startStr = fmtZimbra(input.start, allDay);
+    const endStr = fmtZimbra(input.end, allDay);
+    const desc = (input.description || '').trim();
+    const loc = (input.location || '').trim();
+
+    const attendees = guests.map((a) => ({
+      a,
+      d: a.split('@')[0],
+      role: 'REQ',
+      ptst: 'NE',
+      rsvp: '1',
+    }));
+
+    const comp: Record<string, unknown> = {
+      name: title,
+      allDay: allDay ? '1' : '0',
+      status: 'CONF',
+      fb: 'B',
+      class: 'PUB',
+      draft: 0,
+      s: allDay ? { d: startStr } : { d: startStr, tz },
+      e: allDay ? { d: endStr } : { d: endStr, tz },
+      or: { a: zimbraEmail, d: (cred.displayName || zimbraEmail.split('@')[0]).trim() },
+    };
+    if (loc) comp.loc = loc;
+    if (attendees.length) comp.at = attendees;
+    // Appointment schedule gets invite semantics when guests present
+    if (kind === 'appointment' || kind === 'appointment_schedule') {
+      comp.method = 'REQUEST';
+    }
+
+    const mpChildren: Array<Record<string, unknown>> = [
+      {
+        ct: 'text/plain',
+        content: desc || title,
+      },
+    ];
+    if (desc) {
+      mpChildren.push({
+        ct: 'text/html',
+        content: `<div>${desc.replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br/>')}</div>`,
+      });
+    }
+
+    const msg: Record<string, unknown> = {
+      l: folderId,
+      su: title,
+      inv: { comp: [comp] },
+      mp: {
+        ct: 'multipart/alternative',
+        mp: mpChildren,
+      },
+    };
+    if (guests.length) {
+      msg.e = guests.map((a) => ({ a, t: 't' }));
+    }
+
+    const body = await this.withAuth(
+      nik,
+      (token) =>
+        this.zimbra.call(token, {
+          CreateAppointmentRequest: {
+            _jsns: 'urn:zimbraMail',
+            m: msg,
+          },
+        }),
+      zimbraEmail,
+    );
+
+    const res = (body as { CreateAppointmentResponse?: { calItemId?: string; invId?: string; apptId?: string } })
+      .CreateAppointmentResponse;
+    const appointmentId = String(res?.calItemId || res?.apptId || res?.invId || '');
+    return {
+      id: `${appointmentId || 'new'}-${input.start}`,
+      appointmentId: appointmentId || `new-${input.start}`,
+      title,
+      location: loc || null,
+      start: input.start,
+      end: input.end,
+      allDay,
+      folderId,
+      fragment: desc || undefined,
+    };
+  }
+
+  /** Zimbra GetApptSummaries max span ≈ 200 days. */
+  private static readonly EVENTS_CHUNK_MS = 180 * 86_400_000; // under Zimbra 200-day max
+
+  async getEvents(
+    nik: string,
+    opts: { start: number; end: number; folderId?: string; email?: string },
+  ): Promise<CalendarEvent[]> {
+    const start = Number(opts.start);
+    const end = Number(opts.end);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+      throw new BadRequestException('Query start/end (ms) wajib dan end > start');
+    }
+    // Hard cap ~2 years of chunked fetches
+    if (end - start > 800 * 86_400_000) {
+      throw new BadRequestException('Rentang events maksimal 800 hari');
+    }
+
+    const chunks: CalendarEvent[] = [];
+    let cursor = start;
+    while (cursor < end) {
+      const chunkEnd = Math.min(cursor + MailboxService.EVENTS_CHUNK_MS, end);
+      const part = await this.fetchApptSummaries(
+        nik,
+        cursor,
+        chunkEnd,
+        opts.folderId,
+        opts.email,
+      );
+      chunks.push(...part);
+      cursor = chunkEnd;
+    }
+
+    const seen = new Set<string>();
+    const out: CalendarEvent[] = [];
+    for (const e of chunks) {
+      if (seen.has(e.id)) continue;
+      seen.add(e.id);
+      out.push(e);
+    }
+    return out;
+  }
+
+  private async fetchApptSummaries(
+    nik: string,
+    start: number,
+    end: number,
+    folderId?: string,
+    accountEmail?: string,
+  ): Promise<CalendarEvent[]> {
+    const body = await this.withAuth(
+      nik,
+      (token) =>
+        this.zimbra.call(token, {
+          GetApptSummariesRequest: {
+            _jsns: 'urn:zimbraMail',
+            s: start,
+            e: end,
+            ...(folderId ? { l: folderId } : {}),
+          },
+        }),
+      accountEmail,
+    );
+    const appts = this.asArray(
+      (body as { GetApptSummariesResponse?: { appt?: unknown } }).GetApptSummariesResponse?.appt,
+    );
+    return appts.flatMap((a) => this.mapApptEvents(a));
   }
 
   async searchMessages(
@@ -1004,6 +1228,87 @@ export class MailboxService {
     if (f.view && nonMailViews.has(f.view)) return false;
     if (nonMailNames.has(f.name.toLowerCase())) return false;
     return true;
+  }
+
+
+  private calendarFoldersOnly(nodes: FolderNode[]): FolderNode[] {
+    const top: FolderNode[] = [];
+    for (const n of nodes) {
+      if (n.id === '1' || n.name === 'USER_ROOT') top.push(...(n.children || []));
+      else top.push(n);
+    }
+    const walk = (list: FolderNode[]): FolderNode[] => {
+      const out: FolderNode[] = [];
+      for (const f of list) {
+        const kids = walk(f.children || []);
+        if (this.isCalendarFolder(f)) {
+          out.push({ ...f, children: kids });
+        } else {
+          out.push(...kids);
+        }
+      }
+      return out;
+    };
+    return walk(top);
+  }
+
+  private isCalendarFolder(f: FolderNode): boolean {
+    if (f.id === '10') return true;
+    if (f.view === 'appointment') return true;
+    const n = (f.name || '').toLowerCase();
+    return n === 'calendar' || n === 'kalender';
+  }
+
+  private mapApptEvents(raw: unknown): CalendarEvent[] {
+    const a = raw as {
+      id?: string;
+      uid?: string;
+      name?: string;
+      loc?: string;
+      dur?: number | string;
+      allDay?: boolean | string;
+      l?: string;
+      fr?: string;
+      inst?: unknown;
+      s?: number | string;
+    };
+    const dur = Number(a.dur || 0);
+    const allDay = a.allDay === true || a.allDay === '1';
+    const folderId = a.l ? String(a.l) : undefined;
+    const title = String(a.name || '(tanpa judul)');
+    const location = a.loc ? String(a.loc) : null;
+    const fragment = a.fr ? String(a.fr) : undefined;
+    const appointmentId = String(a.id || a.uid || '');
+
+    const push = (startMs: number, rid?: string): CalendarEvent | null => {
+      if (!Number.isFinite(startMs) || startMs <= 0) return null;
+      const endMs = startMs + (Number.isFinite(dur) && dur > 0 ? dur : allDay ? 86_400_000 : 3_600_000);
+      return {
+        id: `${appointmentId}-${startMs}${rid ? `-${rid}` : ''}`,
+        appointmentId,
+        title,
+        location,
+        start: startMs,
+        end: endMs,
+        allDay,
+        folderId,
+        fragment,
+      };
+    };
+
+    const events: CalendarEvent[] = [];
+    const insts = this.asArray(a.inst);
+    if (insts.length) {
+      for (const inst of insts) {
+        const i = inst as { s?: number | string; ridZ?: string; recurId?: string };
+        const ev = push(Number(i.s || 0), i.ridZ || i.recurId);
+        if (ev) events.push(ev);
+      }
+    } else {
+      const ev = push(Number(a.s || 0));
+      if (ev) events.push(ev);
+    }
+    return events;
   }
 
   private mapFolder(raw: unknown): FolderNode {

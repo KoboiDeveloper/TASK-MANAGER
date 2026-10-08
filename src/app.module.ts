@@ -14,6 +14,7 @@ import { ScheduleModule } from '@nestjs/schedule';
 import { MailboxModule } from './mailbox/mailbox.module';
 import { ChatModule } from './chat/chat.module';
 import { NotificationsModule } from './notifications/notifications.module';
+import { GoogleCalendarModule } from './google-calendar/google-calendar.module';
 @Module({
   imports: [
     ConfigModule.forRoot({
@@ -32,6 +33,7 @@ import { NotificationsModule } from './notifications/notifications.module';
     CronjobModule,
     MailboxModule,
     NotificationsModule,
+    GoogleCalendarModule,
   ],
   controllers: [AppController],
   providers: [AppService],
