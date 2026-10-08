@@ -15,6 +15,8 @@ import { MailboxModule } from './mailbox/mailbox.module';
 import { ChatModule } from './chat/chat.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { GoogleCalendarModule } from './google-calendar/google-calendar.module';
+import { CloudModule } from './cloud/cloud.module';
+
 @Module({
   imports: [
     ConfigModule.forRoot({
@@ -34,6 +36,7 @@ import { GoogleCalendarModule } from './google-calendar/google-calendar.module';
     MailboxModule,
     NotificationsModule,
     GoogleCalendarModule,
+    CloudModule,
   ],
   controllers: [AppController],
   providers: [AppService],
