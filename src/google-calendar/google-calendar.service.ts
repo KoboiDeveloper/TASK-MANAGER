@@ -36,7 +36,7 @@ export type GoogleCalendarEvent = {
   fragment?: string;
   source: 'google';
   accountEmail: string;
-  /** Synced copy from Zimbra — hidden in workspace UI to avoid duplicates */
+  /** Synced copy from Zimbra (may also appear in Zimbra feed) */
   syncedFromZimbra?: boolean;
 };
 
@@ -293,28 +293,49 @@ export class GoogleCalendarService {
     const timeMin = new Date(opts.start).toISOString();
     const timeMax = new Date(opts.end).toISOString();
     const events: GoogleCalendarEvent[] = [];
+    const errors: string[] = [];
 
     for (const acc of accounts) {
       try {
         const token = await this.getValidAccessToken(acc);
-        // Default: primary only (fast). Pass calendarId to target another.
-        const calendarIds = opts.calendarId
-          ? [opts.calendarId]
-          : ['primary'];
+        let calendarIds: string[];
+        if (opts.calendarId?.trim()) {
+          calendarIds = [opts.calendarId.trim()];
+        } else {
+          // Semua kalender yang selected di Google (bukan cuma primary)
+          try {
+            const list = await this.oauth.listCalendars(token);
+            calendarIds = list
+              .filter((c) => c.id && c.selected !== false && !c.deleted)
+              .map((c) => c.id!);
+            if (!calendarIds.length) calendarIds = ['primary'];
+          } catch (e) {
+            this.logger.warn(
+              `calendarList failed for ${acc.googleEmail}, fallback primary: ${String(e)}`,
+            );
+            calendarIds = ['primary'];
+          }
+        }
 
         for (const calId of calendarIds) {
           const raw = await this.oauth.listEvents(token, calId, timeMin, timeMax);
           for (const ev of raw) {
             const mapped = this.mapEvent(ev, calId, acc.googleEmail);
-            // Hide Zimbra→Google mirrors in workspace (shown via Zimbra feed)
-            if (mapped && !mapped.syncedFromZimbra) events.push(mapped);
+            // Keep Zimbra→Google mirrors too (OK to show duplicates alongside Zimbra feed)
+            if (mapped) events.push(mapped);
           }
         }
       } catch (e) {
-        this.logger.warn(
-          `getEvents failed for ${acc.googleEmail}: ${String(e)}`,
-        );
+        const msg = e instanceof Error ? e.message : String(e);
+        this.logger.warn(`getEvents failed for ${acc.googleEmail}: ${msg}`);
+        errors.push(`${acc.googleEmail}: ${msg}`);
       }
+    }
+
+    if (!events.length && errors.length === accounts.length) {
+      throw new BadRequestException(
+        `Gagal memuat Google Calendar — ${errors[0]}. Coba hubungkan ulang di Connected Apps.`,
+      );
     }
 
     events.sort((a, b) => a.start - b.start);

@@ -33,6 +33,8 @@ export type GoogleCalendarListItem = {
   id: string;
   summary: string;
   primary?: boolean;
+  selected?: boolean;
+  deleted?: boolean;
   backgroundColor?: string;
   foregroundColor?: string;
   accessRole?: string;
@@ -179,15 +181,19 @@ export class GoogleOAuthClient {
     calendarId: string,
     body: Record<string, unknown>,
   ): Promise<GoogleCalendarEventRaw> {
-    const { data } = await axios.post<GoogleCalendarEventRaw>(
-      `${CALENDAR_API}/calendars/${encodeURIComponent(calendarId)}/events`,
-      body,
-      {
-        headers: { Authorization: `Bearer ${accessToken}` },
-        timeout: 20_000,
-      },
-    );
-    return data;
+    try {
+      const { data } = await axios.post<GoogleCalendarEventRaw>(
+        `${CALENDAR_API}/calendars/${encodeURIComponent(calendarId)}/events`,
+        body,
+        {
+          headers: { Authorization: `Bearer ${accessToken}` },
+          timeout: 20_000,
+        },
+      );
+      return data;
+    } catch (e) {
+      throw new BadRequestException(this.googleApiError(e, 'Gagal membuat event Google'));
+    }
   }
 
   async updateEvent(
@@ -229,28 +235,43 @@ export class GoogleOAuthClient {
   ): Promise<GoogleCalendarEventRaw[]> {
     const events: GoogleCalendarEventRaw[] = [];
     let pageToken: string | undefined;
-    do {
-      const { data } = await axios.get<{
-        items?: GoogleCalendarEventRaw[];
-        nextPageToken?: string;
-      }>(`${CALENDAR_API}/calendars/${encodeURIComponent(calendarId)}/events`, {
-        headers: { Authorization: `Bearer ${accessToken}` },
-        params: {
-          timeMin: timeMinIso,
-          timeMax: timeMaxIso,
-          singleEvents: true,
-          orderBy: 'startTime',
-          maxResults: 2500,
-          pageToken,
-        },
-        timeout: 25_000,
-      });
-      for (const it of data.items || []) {
-        if (it?.status === 'cancelled') continue;
-        events.push(it);
-      }
-      pageToken = data.nextPageToken;
-    } while (pageToken);
+    try {
+      do {
+        const { data } = await axios.get<{
+          items?: GoogleCalendarEventRaw[];
+          nextPageToken?: string;
+        }>(`${CALENDAR_API}/calendars/${encodeURIComponent(calendarId)}/events`, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+          params: {
+            timeMin: timeMinIso,
+            timeMax: timeMaxIso,
+            singleEvents: true,
+            orderBy: 'startTime',
+            maxResults: 2500,
+            pageToken,
+          },
+          timeout: 25_000,
+        });
+        for (const it of data.items || []) {
+          if (it?.status === 'cancelled') continue;
+          events.push(it);
+        }
+        pageToken = data.nextPageToken;
+      } while (pageToken);
+    } catch (e) {
+      throw new BadRequestException(this.googleApiError(e, 'Gagal memuat event Google'));
+    }
     return events;
+  }
+
+  private googleApiError(e: unknown, fallback: string): string {
+    const ax = e as {
+      response?: { status?: number; data?: { error?: { message?: string; status?: string } } };
+      message?: string;
+    };
+    const apiMsg = ax.response?.data?.error?.message;
+    const status = ax.response?.status;
+    if (apiMsg) return status ? `${fallback} (${status}: ${apiMsg})` : `${fallback}: ${apiMsg}`;
+    return ax.message || fallback;
   }
 }
