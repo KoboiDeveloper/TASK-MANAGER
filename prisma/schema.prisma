@@ -12,7 +12,7 @@ model DT_USER {
   nama         String  @db.VarChar(40)
   password     String  @db.VarChar(100)
   noTelp       String? @db.VarChar(13)
-  email        String? @db.VarChar(30)
+  email        String? @db.VarChar(100)
   roleId       String  @db.VarChar(20)
   handleWeb    Boolean @default(false)
   statusActive Boolean
@@ -40,6 +40,7 @@ model DT_USER {
   chatMemberships    DT_CHAT_MEMBER[]
   chatRoomsCreated   DT_CHAT_ROOM[]           @relation("ChatRoomsCreated")
   pushSubscriptions  DT_PUSH_SUBSCRIPTION[]
+
 }
 
 model DT_ROLE {
@@ -488,3 +489,4 @@ model DT_MAILBOX_CREDENTIAL {
   @@unique([nik, zimbraEmail])
   @@index([nik])
 }
+

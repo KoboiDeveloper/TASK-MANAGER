@@ -43,7 +43,7 @@ export class DropboxStorageService implements IStorageService {
       );
     }
 
-    this.basePath = process.env.DROPBOX_FOLDER_PATH || '/task-manager-files';
+    this.basePath = process.env.CLOUD_DROPBOX_FOLDER_PATH || process.env.DROPBOX_FOLDER_PATH || '/CLOUD_STORAGE';
     this.logger.log(`DropboxStorageService initialized dengan basePath: ${this.basePath}`);
   }
 
@@ -258,7 +258,7 @@ export class DropboxStorageService implements IStorageService {
     };
   }
 
-  /** Download file bytes from Dropbox for inline preview. */
+  /** Download file bytes from Dropbox for inline preview (no attachment redirect). */
   async downloadFile(path: string): Promise<Buffer> {
     const fullPath = path.startsWith(this.basePath)
       ? path

@@ -1,0 +1,155 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../node_modules/.prisma/cloud-client"
+}
+
+datasource db {
+  provider = "sqlserver"
+  url      = env("CLOUD_DATABASE_URL")
+}
+
+model DT_USER {
+  nik          String  @id @db.Char(8)
+  nama         String  @db.VarChar(40)
+  password     String  @db.VarChar(100)
+  noTelp       String? @db.VarChar(13)
+  email        String? @db.VarChar(100)
+  roleId       String  @db.VarChar(20)
+  handleWeb    Boolean @default(true)
+  statusActive Boolean @default(true)
+  photo        String? @db.VarChar(500)
+  departement  String? @db.VarChar(50)
+
+  role            DT_ROLE               @relation(fields: [roleId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  forgotPasswords LOG_FORGOT_PASSWORD[]
+  refreshTokens   LOG_REFRESH_TOKEN[]
+  quota           DT_USER_QUOTA?
+  ownedFolders    DT_FOLDER[]           @relation("FolderOwner")
+  ownedFiles      DT_FILE[]             @relation("FileOwner")
+  sharesReceived  DT_SHARE[]            @relation("ShareTarget")
+  sharesGiven     DT_SHARE[]            @relation("ShareGiver")
+  shareLinks      DT_SHARE_LINK[]       @relation("ShareLinkCreator")
+}
+
+model DT_ROLE {
+  id    String    @id @db.VarChar(20)
+  nama  String    @db.VarChar(20)
+  users DT_USER[]
+}
+
+model LOG_FORGOT_PASSWORD {
+  otp       String   @id @db.Char(6)
+  nik       String   @db.Char(8)
+  used      Boolean  @default(false)
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+  user      DT_USER  @relation(fields: [nik], references: [nik], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model LOG_REFRESH_TOKEN {
+  id         String   @id @db.VarChar(64)
+  nik        String   @db.Char(8)
+  family     String   @db.VarChar(64)
+  isRevoked  Boolean  @default(false)
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  userAgent  String?  @db.NVarChar(500)
+  deviceHash String?  @db.VarChar(64)
+
+  user DT_USER @relation(fields: [nik], references: [nik], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([nik])
+  @@index([family])
+  @@index([nik, deviceHash])
+}
+
+model DT_USER_QUOTA {
+  nik        String   @id @db.Char(8)
+  limitBytes BigInt   @default(5368709120)
+  usedBytes  BigInt   @default(0)
+  updatedAt  DateTime @updatedAt
+  user       DT_USER  @relation(fields: [nik], references: [nik], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model DT_FOLDER {
+  id          String    @id @default(uuid()) @db.UniqueIdentifier
+  name        String    @db.NVarChar(255)
+  parentId    String?   @db.UniqueIdentifier
+  ownerNik    String    @db.Char(8)
+  description String?   @db.NVarChar(500)
+  starred     Boolean   @default(false)
+  trashedAt   DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  owner    DT_USER    @relation("FolderOwner", fields: [ownerNik], references: [nik], onDelete: NoAction, onUpdate: NoAction)
+  parent   DT_FOLDER? @relation("FolderTree", fields: [parentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  children DT_FOLDER[] @relation("FolderTree")
+  files    DT_FILE[]
+
+  @@index([ownerNik])
+  @@index([parentId])
+  @@index([trashedAt])
+  @@index([starred])
+}
+
+model DT_FILE {
+  id          String    @id @default(uuid()) @db.UniqueIdentifier
+  name        String    @db.NVarChar(255)
+  mimeType    String    @db.VarChar(100)
+  bytes       BigInt
+  dropboxPath String    @db.NVarChar(500)
+  url         String?   @db.NVarChar(1000)
+  folderId    String?   @db.UniqueIdentifier
+  ownerNik    String    @db.Char(8)
+  description String?   @db.NVarChar(500)
+  starred     Boolean   @default(false)
+  trashedAt   DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  owner  DT_USER    @relation("FileOwner", fields: [ownerNik], references: [nik], onDelete: NoAction, onUpdate: NoAction)
+  folder DT_FOLDER? @relation(fields: [folderId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([ownerNik])
+  @@index([folderId])
+  @@index([trashedAt])
+  @@index([starred])
+  @@index([updatedAt])
+}
+
+model DT_SHARE {
+  id         String   @id @default(uuid()) @db.UniqueIdentifier
+  itemId     String   @db.UniqueIdentifier
+  itemType   String   @db.VarChar(10)
+  targetNik  String   @db.Char(8)
+  permission String   @db.VarChar(10)
+  createdBy  String   @db.Char(8)
+  createdAt  DateTime @default(now())
+
+  target DT_USER @relation("ShareTarget", fields: [targetNik], references: [nik], onDelete: Cascade, onUpdate: NoAction)
+  giver  DT_USER @relation("ShareGiver", fields: [createdBy], references: [nik], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([itemId, itemType, targetNik])
+  @@index([targetNik])
+  @@index([itemId, itemType])
+}
+
+model DT_SHARE_LINK {
+  id           String    @id @default(uuid()) @db.UniqueIdentifier
+  token        String    @unique @db.VarChar(64)
+  itemId       String    @db.UniqueIdentifier
+  itemType     String    @db.VarChar(10)
+  permission   String    @db.VarChar(10) @default("VIEW")
+  passwordHash String?   @db.VarChar(100)
+  expiresAt    DateTime?
+  createdBy    String    @db.Char(8)
+  createdAt    DateTime  @default(now())
+  revokedAt    DateTime?
+
+  creator DT_USER @relation("ShareLinkCreator", fields: [createdBy], references: [nik], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([itemId, itemType])
+  @@index([token])
+}
