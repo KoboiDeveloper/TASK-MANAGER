@@ -770,9 +770,31 @@ export class MailboxService {
     return this.withAuth(nik, (token) => this.zimbra.downloadContent(token, path));
   }
 
-  private async withAuth<T>(nik: string, fn: (token: string) => Promise<T>): Promise<T> {
-    const cred = await this.prisma.dT_MAILBOX_CREDENTIAL.findFirst({ where: { nik } });
-    if (!cred) throw new BadRequestException('Mailbox belum terhubung. Hubungkan akun Zimbra dulu.');
+  private async resolveCredential(nik: string, accountEmail?: string) {
+    const user = await this.prisma.dT_USER.findUnique({
+      where: { nik },
+      select: { activeZimbraEmail: true },
+    });
+    const email =
+      normalizeMailboxEmail(accountEmail || user?.activeZimbraEmail || '') || null;
+    if (!email) {
+      throw new BadRequestException('Mailbox belum terhubung. Hubungkan akun Zimbra dulu.');
+    }
+    const cred = await this.prisma.dT_MAILBOX_CREDENTIAL.findUnique({
+      where: { nik_zimbraEmail: { nik, zimbraEmail: email } },
+    });
+    if (!cred) {
+      throw new BadRequestException('Mailbox belum terhubung. Hubungkan akun Zimbra dulu.');
+    }
+    return cred;
+  }
+
+  private async withAuth<T>(
+    nik: string,
+    fn: (token: string) => Promise<T>,
+    accountEmail?: string,
+  ): Promise<T> {
+    const cred = await this.resolveCredential(nik, accountEmail);
 
     let token = cred.authToken;
     const expired =
