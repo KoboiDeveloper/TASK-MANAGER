@@ -70,8 +70,9 @@ export class AuthGuard implements CanActivate {
   }
 
   private extractToken(request: Request): string | undefined {
-    const cookies = request.cookies as Record<string, string>;
-    if (cookies?.['access_token']) return cookies['access_token'];
+    const cookies = (request.cookies as Record<string, string>) || {};
+    // Cloud-only cookie — do not read Task Manager access_token (wrong secret → 401 cascade)
+    if (cookies['cloud_access_token']) return cookies['cloud_access_token'];
     const authHeader = request.headers['authorization'];
     if (authHeader && typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
       return authHeader.slice(7).trim();

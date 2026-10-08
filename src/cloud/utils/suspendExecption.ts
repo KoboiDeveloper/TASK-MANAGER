@@ -20,12 +20,15 @@ export class SuspendedUserFilter implements ExceptionFilter {
     const ctx = host.switchToHttp();
     const response = ctx.getResponse<Response>();
 
-    response.clearCookie('access_token', {
+    const clearOpts = {
       path: '/',
       httpOnly: true,
-      sameSite: 'lax',
+      sameSite: 'lax' as const,
       secure: process.env.NODE_ENV === 'production',
-    });
+    };
+    // Only clear Cloud session cookies — never Task Manager access_token
+    response.clearCookie('cloud_access_token', clearOpts);
+    response.clearCookie('cloud_refresh_token', clearOpts);
 
     const status = exception.getStatus();
     const body = exception.getResponse();
