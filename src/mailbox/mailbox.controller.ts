@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -30,6 +31,7 @@ import {
   MessageActionDto,
   SaveSignatureDto,
   SendMessageDto,
+  SetActiveMailboxDto,
 } from './dto/mailbox.dto';
 import { MulterExceptionFilter } from './multer-exception.filter';
 
@@ -61,10 +63,29 @@ export class MailboxController {
   }
 
   @Delete('connect')
-  async disconnect(@Req() req: Request & { user?: AuthUser }) {
+  async disconnect(
+    @Req() req: Request & { user?: AuthUser },
+    @Query('email') email?: string,
+  ) {
     try {
-      const data = await this.mailbox.disconnect(req.user!.nik);
+      if (!email?.trim()) {
+        throw new BadRequestException('Query email wajib');
+      }
+      const data = await this.mailbox.disconnect(req.user!.nik, email);
       return new CommonResponse('Mailbox disconnected', HttpStatus.OK, data);
+    } catch (e) {
+      return handleException(e);
+    }
+  }
+
+  @Put('active')
+  async setActive(
+    @Req() req: Request & { user?: AuthUser },
+    @Body() dto: SetActiveMailboxDto,
+  ) {
+    try {
+      const data = await this.mailbox.setActive(req.user!.nik, dto.email);
+      return new CommonResponse('Active mailbox updated', HttpStatus.OK, data);
     } catch (e) {
       return handleException(e);
     }

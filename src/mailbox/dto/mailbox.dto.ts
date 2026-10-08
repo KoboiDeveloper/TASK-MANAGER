@@ -9,6 +9,11 @@ export class ConnectMailboxDto {
   password: string;
 }
 
+export class SetActiveMailboxDto {
+  @IsEmail()
+  email: string;
+}
+
 export class SendMessageDto {
   /** Boleh kosong saat menyimpan draf; wajib saat kirim (dicek di service). */
   @IsOptional()

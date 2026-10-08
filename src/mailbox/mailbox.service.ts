@@ -11,6 +11,10 @@ import { ZimbraSoapClient } from './zimbra-soap.client';
 import { DropboxStorageService } from '../storage/dropbox.storage.service';
 import { ConnectMailboxDto, MessageActionDto, SendMessageDto } from './dto/mailbox.dto';
 import { DROPBOX_GLYPH_CID, DROPBOX_GLYPH_PNG } from './dropbox-glyph';
+import {
+  normalizeMailboxEmail,
+  pickActiveAfterDisconnect,
+} from './mailbox-active.util';
 
 export type FolderNode = {
   id: string;
@@ -57,23 +61,56 @@ export class MailboxService {
   ) {}
 
   async getStatus(nik: string) {
-    const cred = await this.prisma.dT_MAILBOX_CREDENTIAL.findUnique({ where: { nik } });
+    const rows = await this.prisma.dT_MAILBOX_CREDENTIAL.findMany({
+      where: { nik },
+      orderBy: { createdAt: 'desc' },
+      select: { zimbraEmail: true, createdAt: true, updatedAt: true },
+    });
+    const user = await this.prisma.dT_USER.findUnique({
+      where: { nik },
+      select: { activeZimbraEmail: true },
+    });
+    const accounts = rows.map((r) => ({
+      email: r.zimbraEmail,
+      createdAt: r.createdAt.toISOString(),
+      updatedAt: r.updatedAt.toISOString(),
+    }));
+    let activeEmail = user?.activeZimbraEmail ?? null;
+    if (activeEmail && !accounts.some((a) => a.email === activeEmail)) {
+      activeEmail = pickActiveAfterDisconnect(
+        rows.map((r) => ({ zimbraEmail: r.zimbraEmail, createdAt: r.createdAt })),
+      );
+      await this.prisma.dT_USER.update({
+        where: { nik },
+        data: { activeZimbraEmail: activeEmail },
+      });
+    }
+    if (!activeEmail && accounts.length) {
+      activeEmail = accounts[0].email; // newest (query desc)
+      await this.prisma.dT_USER.update({
+        where: { nik },
+        data: { activeZimbraEmail: activeEmail },
+      });
+    }
     return {
-      connected: !!cred,
-      email: cred?.zimbraEmail ?? null,
-      updatedAt: cred?.updatedAt?.toISOString() ?? null,
+      connected: accounts.length > 0,
+      activeEmail,
+      email: activeEmail, // compat
+      accounts,
+      updatedAt: accounts[0]?.updatedAt ?? null,
     };
   }
 
   async connect(nik: string, dto: ConnectMailboxDto) {
-    const email = dto.email.trim().toLowerCase();
+    const email = normalizeMailboxEmail(dto.email);
     const { authToken, lifetimeMs } = await this.zimbra.auth(email, dto.password);
     const enc = this.crypto.encrypt(dto.password);
     const expires = new Date(Date.now() + Math.max(lifetimeMs - 60_000, 5 * 60_000));
 
     await this.prisma.dT_MAILBOX_CREDENTIAL.upsert({
-      where: { nik },
+      where: { nik_zimbraEmail: { nik, zimbraEmail: email } },
       create: {
+        id: randomUUID(),
         nik,
         zimbraEmail: email,
         passwordCipher: enc.cipher,
@@ -83,7 +120,6 @@ export class MailboxService {
         authTokenExpiresAt: expires,
       },
       update: {
-        zimbraEmail: email,
         passwordCipher: enc.cipher,
         passwordIv: enc.iv,
         passwordTag: enc.tag,
@@ -92,12 +128,56 @@ export class MailboxService {
       },
     });
 
-    return { connected: true, email };
+    await this.prisma.dT_USER.update({
+      where: { nik },
+      data: { activeZimbraEmail: email },
+    });
+
+    return { connected: true, email, activeEmail: email };
   }
 
-  async disconnect(nik: string) {
-    await this.prisma.dT_MAILBOX_CREDENTIAL.deleteMany({ where: { nik } });
-    return { connected: false };
+  async disconnect(nik: string, email: string) {
+    const normalized = normalizeMailboxEmail(email);
+    const deleted = await this.prisma.dT_MAILBOX_CREDENTIAL.deleteMany({
+      where: { nik, zimbraEmail: normalized },
+    });
+    if (deleted.count === 0) {
+      throw new BadRequestException('Akun tidak ditemukan');
+    }
+
+    const user = await this.prisma.dT_USER.findUnique({
+      where: { nik },
+      select: { activeZimbraEmail: true },
+    });
+    const active = user?.activeZimbraEmail ?? null;
+    if (!active || normalizeMailboxEmail(active) === normalized) {
+      const remaining = await this.prisma.dT_MAILBOX_CREDENTIAL.findMany({
+        where: { nik },
+        select: { zimbraEmail: true, createdAt: true },
+      });
+      const nextActive = pickActiveAfterDisconnect(remaining);
+      await this.prisma.dT_USER.update({
+        where: { nik },
+        data: { activeZimbraEmail: nextActive },
+      });
+    }
+
+    return this.getStatus(nik);
+  }
+
+  async setActive(nik: string, email: string) {
+    const normalized = normalizeMailboxEmail(email);
+    const cred = await this.prisma.dT_MAILBOX_CREDENTIAL.findUnique({
+      where: { nik_zimbraEmail: { nik, zimbraEmail: normalized } },
+    });
+    if (!cred) {
+      throw new BadRequestException('Akun tidak ditemukan');
+    }
+    await this.prisma.dT_USER.update({
+      where: { nik },
+      data: { activeZimbraEmail: normalized },
+    });
+    return this.getStatus(nik);
   }
 
   async getFolders(nik: string): Promise<FolderNode[]> {
@@ -691,7 +771,7 @@ export class MailboxService {
   }
 
   private async withAuth<T>(nik: string, fn: (token: string) => Promise<T>): Promise<T> {
-    const cred = await this.prisma.dT_MAILBOX_CREDENTIAL.findUnique({ where: { nik } });
+    const cred = await this.prisma.dT_MAILBOX_CREDENTIAL.findFirst({ where: { nik } });
     if (!cred) throw new BadRequestException('Mailbox belum terhubung. Hubungkan akun Zimbra dulu.');
 
     let token = cred.authToken;
@@ -719,6 +799,7 @@ export class MailboxService {
   }
 
   private async refreshAuth(cred: {
+    id: string;
     nik: string;
     zimbraEmail: string;
     passwordCipher: string;
@@ -733,7 +814,7 @@ export class MailboxService {
     const { authToken, lifetimeMs } = await this.zimbra.auth(cred.zimbraEmail, password);
     const expires = new Date(Date.now() + Math.max(lifetimeMs - 60_000, 5 * 60_000));
     await this.prisma.dT_MAILBOX_CREDENTIAL.update({
-      where: { nik: cred.nik },
+      where: { id: cred.id },
       data: { authToken, authTokenExpiresAt: expires },
     });
     return authToken;
