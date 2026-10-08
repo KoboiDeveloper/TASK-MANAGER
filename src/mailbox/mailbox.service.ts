@@ -64,14 +64,46 @@ export class MailboxService {
     const rows = await this.prisma.dT_MAILBOX_CREDENTIAL.findMany({
       where: { nik },
       orderBy: { createdAt: 'desc' },
-      select: { zimbraEmail: true, createdAt: true, updatedAt: true },
+      select: {
+        id: true,
+        zimbraEmail: true,
+        displayName: true,
+        createdAt: true,
+        updatedAt: true,
+        authToken: true,
+        authTokenExpiresAt: true,
+      },
     });
+
+    // Backfill nama dari Zimbra jika connect sebelumnya gagal parse attrs._attrs
+    for (const r of rows) {
+      if (r.displayName?.trim()) continue;
+      const tokenOk =
+        !!r.authToken &&
+        !!r.authTokenExpiresAt &&
+        r.authTokenExpiresAt.getTime() > Date.now() + 30_000;
+      if (!tokenOk) continue;
+      try {
+        const name = await this.zimbra.getAccountDisplayName(r.authToken!);
+        if (name) {
+          await this.prisma.dT_MAILBOX_CREDENTIAL.update({
+            where: { id: r.id },
+            data: { displayName: name },
+          });
+          r.displayName = name;
+        }
+      } catch {
+        /* optional */
+      }
+    }
+
     const user = await this.prisma.dT_USER.findUnique({
       where: { nik },
       select: { activeZimbraEmail: true },
     });
     const accounts = rows.map((r) => ({
       email: r.zimbraEmail,
+      name: (r.displayName || '').trim() || null,
       createdAt: r.createdAt.toISOString(),
       updatedAt: r.updatedAt.toISOString(),
     }));
@@ -104,6 +136,7 @@ export class MailboxService {
   async connect(nik: string, dto: ConnectMailboxDto) {
     const email = normalizeMailboxEmail(dto.email);
     const { authToken, lifetimeMs } = await this.zimbra.auth(email, dto.password);
+    const displayName = (await this.zimbra.getAccountDisplayName(authToken)) || null;
     const enc = this.crypto.encrypt(dto.password);
     const expires = new Date(Date.now() + Math.max(lifetimeMs - 60_000, 5 * 60_000));
 
@@ -113,6 +146,7 @@ export class MailboxService {
         id: randomUUID(),
         nik,
         zimbraEmail: email,
+        displayName,
         passwordCipher: enc.cipher,
         passwordIv: enc.iv,
         passwordTag: enc.tag,
@@ -120,6 +154,7 @@ export class MailboxService {
         authTokenExpiresAt: expires,
       },
       update: {
+        ...(displayName ? { displayName } : {}),
         passwordCipher: enc.cipher,
         passwordIv: enc.iv,
         passwordTag: enc.tag,
@@ -133,7 +168,7 @@ export class MailboxService {
       data: { activeZimbraEmail: email },
     });
 
-    return { connected: true, email, activeEmail: email };
+    return { connected: true, email, activeEmail: email, name: displayName };
   }
 
   async disconnect(nik: string, email: string) {
@@ -806,6 +841,21 @@ export class MailboxService {
       token = await this.refreshAuth(cred);
     }
 
+    if (!cred.displayName?.trim() && token) {
+      try {
+        const name = await this.zimbra.getAccountDisplayName(token);
+        if (name) {
+          await this.prisma.dT_MAILBOX_CREDENTIAL.update({
+            where: { id: cred.id },
+            data: { displayName: name },
+          });
+          (cred as { displayName?: string | null }).displayName = name;
+        }
+      } catch {
+        /* optional backfill */
+      }
+    }
+
     try {
       return await fn(token!);
     } catch (e) {
@@ -824,6 +874,7 @@ export class MailboxService {
     id: string;
     nik: string;
     zimbraEmail: string;
+    displayName?: string | null;
     passwordCipher: string;
     passwordIv: string;
     passwordTag: string;
@@ -835,9 +886,18 @@ export class MailboxService {
     });
     const { authToken, lifetimeMs } = await this.zimbra.auth(cred.zimbraEmail, password);
     const expires = new Date(Date.now() + Math.max(lifetimeMs - 60_000, 5 * 60_000));
+    const data: {
+      authToken: string;
+      authTokenExpiresAt: Date;
+      displayName?: string;
+    } = { authToken, authTokenExpiresAt: expires };
+    if (!cred.displayName?.trim()) {
+      const name = await this.zimbra.getAccountDisplayName(authToken);
+      if (name) data.displayName = name;
+    }
     await this.prisma.dT_MAILBOX_CREDENTIAL.update({
       where: { id: cred.id },
-      data: { authToken, authTokenExpiresAt: expires },
+      data,
     });
     return authToken;
   }

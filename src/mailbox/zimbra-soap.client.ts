@@ -46,6 +46,81 @@ export class ZimbraSoapClient {
     return { authToken: token, lifetimeMs: Number.isFinite(lifetimeMs) ? lifetimeMs : 12 * 60 * 60 * 1000 };
   }
 
+
+  /** Display name dari GetInfo (`attrs._attrs.displayName` / identity From display). */
+  async getAccountDisplayName(authToken: string): Promise<string | null> {
+    try {
+      const body = await this.call<{
+        GetInfoResponse?: {
+          name?: string;
+          attrs?: unknown;
+          identities?: {
+            identity?:
+              | Array<{ name?: string; _attrs?: Record<string, string | string[] | undefined> }>
+              | { name?: string; _attrs?: Record<string, string | string[] | undefined> };
+          };
+        };
+      }>(authToken, {
+        GetInfoRequest: {
+          _jsns: 'urn:zimbraAccount',
+          sections: 'mbox,attrs,idents',
+        },
+      });
+      const info = body.GetInfoResponse;
+      const flat = this.flattenZimbraAttrs(info?.attrs);
+      const pick = (...keys: string[]) => {
+        for (const key of keys) {
+          const raw = flat[key] ?? flat[key.toLowerCase()];
+          const v = (Array.isArray(raw) ? raw[0] : raw || '').toString().trim();
+          if (v) return v;
+        }
+        return '';
+      };
+
+      const idents = info?.identities?.identity;
+      const identList = Array.isArray(idents) ? idents : idents ? [idents] : [];
+      const defaultIdent =
+        identList.find((i) => (i.name || '').toUpperCase() === 'DEFAULT') || identList[0];
+      const fromDisplay = (
+        Array.isArray(defaultIdent?._attrs?.zimbraPrefFromDisplay)
+          ? defaultIdent?._attrs?.zimbraPrefFromDisplay[0]
+          : defaultIdent?._attrs?.zimbraPrefFromDisplay || ''
+      )
+        .toString()
+        .trim();
+
+      const name =
+        pick('displayName', 'cn', 'fullName') ||
+        fromDisplay ||
+        [pick('givenName'), pick('sn')].filter(Boolean).join(' ').trim();
+      return name || null;
+    } catch (e) {
+      this.logger.warn(`GetInfo displayName failed: ${(e as Error).message}`);
+      return null;
+    }
+  }
+
+  /** Zimbra JSON sering nest attrs sebagai `{ _attrs: { displayName } }` atau array `a`. */
+  private flattenZimbraAttrs(attrs: unknown): Record<string, string | string[] | undefined> {
+    if (!attrs) return {};
+    if (Array.isArray(attrs)) {
+      const out: Record<string, string | string[] | undefined> = {};
+      for (const item of attrs) {
+        const a = item as { _name?: string; n?: string; _content?: string };
+        const key = (a._name || a.n || '').trim();
+        const val = (a._content || '').trim();
+        if (key && val) out[key] = val;
+      }
+      return out;
+    }
+    if (typeof attrs !== 'object') return {};
+    const obj = attrs as Record<string, unknown>;
+    if (obj._attrs && typeof obj._attrs === 'object' && !Array.isArray(obj._attrs)) {
+      return obj._attrs as Record<string, string | string[] | undefined>;
+    }
+    return obj as Record<string, string | string[] | undefined>;
+  }
+
   async call<T = SoapBody>(
     authToken: string,
     body: SoapBody,

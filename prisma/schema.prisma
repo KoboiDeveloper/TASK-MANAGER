@@ -474,6 +474,7 @@ model DT_MAILBOX_CREDENTIAL {
   id                 String    @id @db.VarChar(36)
   nik                String    @db.Char(8)
   zimbraEmail        String    @db.NVarChar(255)
+  displayName        String?   @db.NVarChar(255)
   passwordCipher     String    @db.NVarChar(Max)
   passwordIv         String    @db.VarChar(64)
   passwordTag        String    @db.VarChar(64)
