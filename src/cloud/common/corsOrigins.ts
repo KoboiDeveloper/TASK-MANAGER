@@ -3,13 +3,23 @@ export function getAllowedOrigins(): string[] {
     'http://localhost:3100',
     'http://127.0.0.1:3100',
     'http://localhost:3000',
+    'https://cloud.amscorp.id',
+    'https://workspace.amscorp.id',
     process.env.FRONTEND_URL,
+    process.env.CLOUD_FRONTEND_URL,
   ].filter(Boolean) as string[];
 }
 
 export function isOriginAllowed(origin?: string | null): boolean {
   if (!origin) return true;
-  if (getAllowedOrigins().includes(origin) || origin.endsWith('.vercel.app')) return true;
+  if (
+    getAllowedOrigins().includes(origin) ||
+    origin.endsWith('.vercel.app') ||
+    origin === 'https://amscorp.id' ||
+    origin.endsWith('.amscorp.id')
+  ) {
+    return true;
+  }
   try {
     const u = new URL(origin);
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;

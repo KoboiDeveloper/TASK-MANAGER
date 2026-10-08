@@ -2,6 +2,7 @@ export function getAllowedOrigins(): string[] {
   return [
     'https://task-manager-fe-lyart.vercel.app',
     'https://workspace.amscorp.id',
+    'https://cloud.amscorp.id',
     'http://localhost:3000',
     'http://127.0.0.1:3000',
     'http://localhost:3100',
@@ -13,7 +14,14 @@ export function getAllowedOrigins(): string[] {
 
 export function isOriginAllowed(origin?: string | null): boolean {
   if (!origin) return true;
-  if (getAllowedOrigins().includes(origin) || origin.endsWith('.vercel.app')) return true;
+  if (
+    getAllowedOrigins().includes(origin) ||
+    origin.endsWith('.vercel.app') ||
+    origin === 'https://amscorp.id' ||
+    origin.endsWith('.amscorp.id')
+  ) {
+    return true;
+  }
   // Dev: FE di LAN IP (http://192.168.x.x:3000) upload langsung ke BE :1000
   try {
     const u = new URL(origin);
