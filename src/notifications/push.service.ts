@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
-import { Injectable, Logger, ModuleRef, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { ModuleRef } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
 import webpush from 'web-push';
 import { PrismaService } from '../prisma/prisma.service';
