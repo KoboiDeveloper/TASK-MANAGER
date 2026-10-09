@@ -294,7 +294,7 @@ export class AuthService {
     );
   }
 
-  async sendForgotPassword({ nik }: ForgotPasswordRequest): Promise<string> {
+  async sendForgotPassword({ nik, from }: ForgotPasswordRequest): Promise<string> {
     const user = await this.prisma.dT_USER.findUnique({ where: { nik } });
     if (!user) throw new NotFoundException('User tidak ditemukan');
     if (!user.email?.trim()) {
@@ -320,15 +320,24 @@ export class AuthService {
       data: { otp, nik: user.nik, expiresAt },
     });
 
-    await sendCloudResetPasswordEmail(user.email, token, otp, user.nama);
+    await sendCloudResetPasswordEmail(user.email, token, otp, user.nama, from);
     return 'Kode reset password telah dikirim ke email Anda';
   }
 
-  async resetPasswordWithOtp({ otp, newPassword }: CloudResetPasswordRequest): Promise<string> {
+  async resetPasswordWithOtp(data: CloudResetPasswordRequest): Promise<{
+    message: string;
+    nik: string;
+    handoffToken?: string;
+    tokens?: LoginResponse;
+  }> {
+    const { otp, newPassword, issueHandoff, autoLogin } = data;
     const row = await this.prisma.lOG_FORGOT_PASSWORD.findUnique({ where: { otp } });
     if (!row || row.used || new Date() > new Date(row.expiresAt)) {
       throw new BadRequestException('OTP tidak valid atau sudah kedaluwarsa');
     }
+
+    const user = await this.prisma.dT_USER.findUnique({ where: { nik: row.nik } });
+    if (!user) throw new NotFoundException('User tidak ditemukan');
 
     const password = encodePassword(newPassword);
     await this.prisma.$transaction([
@@ -342,7 +351,131 @@ export class AuthService {
       }),
     ]);
     await this.revokeAllRefreshTokens(row.nik);
-    return 'Password berhasil diubah';
+
+    const result: {
+      message: string;
+      nik: string;
+      handoffToken?: string;
+      tokens?: LoginResponse;
+    } = {
+      message: 'Password berhasil diubah',
+      nik: row.nik,
+    };
+
+    if (issueHandoff) {
+      result.handoffToken = await this.issueWorkspaceHandoff(row.nik);
+    }
+
+    if (autoLogin) {
+      result.tokens = await this.generateTokens(
+        {
+          nik: user.nik,
+          nama: user.nama,
+          roleId: user.roleId,
+          mustChangePassword: false,
+        },
+        undefined,
+        { userAgent: 'reset-auto-login' },
+      );
+    }
+
+    return result;
+  }
+
+  /** One-time JWT (~3m) stored as LOG_REFRESH_TOKEN row with userAgent=handoff */
+  async issueWorkspaceHandoff(nik: string): Promise<string> {
+    const user = await this.prisma.dT_USER.findUnique({ where: { nik } });
+    if (!user || !user.statusActive) throw new UnauthorizedException('User tidak valid');
+
+    const jti = randomUUID();
+    const family = randomUUID();
+    const expiresAt = new Date(Date.now() + 3 * 60 * 1000);
+
+    await this.prisma.lOG_REFRESH_TOKEN.create({
+      data: {
+        id: jti,
+        nik,
+        family,
+        isRevoked: false,
+        expiresAt,
+        userAgent: 'handoff',
+      },
+    });
+
+    return this.jwtService.signAsync(
+      {
+        nik,
+        jti,
+        family,
+        type: 'cloud_workspace_handoff',
+      },
+      {
+        expiresIn: '3m' as any,
+        secret: this.getAccessSecret(),
+        issuer: this.getIssuer(),
+      },
+    );
+  }
+
+  async redeemWorkspaceHandoff(
+    handoffToken: string,
+    userAgent?: string,
+  ): Promise<LoginResponse> {
+    let payload: {
+      nik?: string;
+      jti?: string;
+      family?: string;
+      type?: string;
+    };
+    try {
+      payload = await this.jwtService.verifyAsync(handoffToken, {
+        secret: this.getAccessSecret(),
+        issuer: this.getIssuer(),
+      });
+    } catch {
+      throw new UnauthorizedException('Handoff token tidak valid atau kedaluwarsa');
+    }
+
+    if (
+      !payload ||
+      payload.type !== 'cloud_workspace_handoff' ||
+      !payload.nik ||
+      !payload.jti
+    ) {
+      throw new UnauthorizedException('Handoff token tidak valid');
+    }
+
+    const record = await this.prisma.lOG_REFRESH_TOKEN.findUnique({
+      where: { id: payload.jti },
+    });
+    if (
+      !record ||
+      record.isRevoked ||
+      record.userAgent !== 'handoff' ||
+      record.nik !== payload.nik ||
+      new Date() > new Date(record.expiresAt)
+    ) {
+      throw new UnauthorizedException('Handoff token sudah dipakai atau kedaluwarsa');
+    }
+
+    await this.prisma.lOG_REFRESH_TOKEN.update({
+      where: { id: record.id },
+      data: { isRevoked: true },
+    });
+
+    const user = await this.prisma.dT_USER.findUnique({ where: { nik: payload.nik } });
+    if (!user || !user.statusActive) throw new UnauthorizedException('User tidak valid');
+
+    return this.generateTokens(
+      {
+        nik: user.nik,
+        nama: user.nama,
+        roleId: user.roleId,
+        mustChangePassword: !!user.mustChangePassword,
+      },
+      undefined,
+      { userAgent: userAgent || 'workspace-handoff' },
+    );
   }
 
   async revokeToken(refreshToken: string): Promise<void> {

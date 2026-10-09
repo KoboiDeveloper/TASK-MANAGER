@@ -19,6 +19,7 @@ import { LoginResponse } from './dto/response/loginResponse';
 import { RefreshTokenRequest } from './dto/request/refreshTokenRequest';
 import { ForgotPasswordRequest } from './dto/request/forgotPasswordRequest';
 import { CloudResetPasswordRequest } from './dto/request/resetPasswordRequest';
+import { WorkspaceHandoffRedeemRequest } from './dto/request/workspaceHandoffRequest';
 import { ChangePasswordRequest } from './dto/request/changePasswordRequest';
 import { AuthGuard } from '../security/authGuard';
 import { handleException } from '../utils/handleException';
@@ -135,10 +136,43 @@ export class AuthController {
 
   @Post('reset-password')
   @HttpCode(HttpStatus.OK)
-  async resetPassword(@Body() body: CloudResetPasswordRequest) {
+  async resetPassword(
+    @Body() body: CloudResetPasswordRequest,
+    @Res({ passthrough: true }) res: Response,
+  ) {
     try {
-      const message = await this.authService.resetPasswordWithOtp(body);
-      return new CommonResponse(message, HttpStatus.OK, message);
+      const result = await this.authService.resetPasswordWithOtp(body);
+      if (body.autoLogin && result.tokens) {
+        this.setAuthCookies(res, result.tokens);
+      }
+      return new CommonResponse(result.message, HttpStatus.OK, {
+        message: result.message,
+        nik: result.nik,
+        handoffToken: result.handoffToken,
+        mustChangePassword: false,
+      });
+    } catch (err) {
+      return handleException(err);
+    }
+  }
+
+  @Post('workspace-handoff/redeem')
+  @HttpCode(HttpStatus.OK)
+  async redeemWorkspaceHandoff(
+    @Body() body: WorkspaceHandoffRedeemRequest,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    try {
+      const ua = req.headers['user-agent'];
+      const tokens = await this.authService.redeemWorkspaceHandoff(
+        body.handoffToken,
+        typeof ua === 'string' ? ua : undefined,
+      );
+      this.setAuthCookies(res, tokens);
+      return new CommonResponse('Cloud Storage terhubung', HttpStatus.OK, {
+        mustChangePassword: !!tokens.mustChangePassword,
+      });
     } catch (err) {
       return handleException(err);
     }

@@ -1,4 +1,12 @@
-import { IsNotEmpty, IsStrongPassword, IsString, MaxLength } from 'class-validator';
+import {
+  IsBoolean,
+  IsNotEmpty,
+  IsOptional,
+  IsStrongPassword,
+  IsString,
+  MaxLength,
+} from 'class-validator';
+import { Transform } from 'class-transformer';
 
 export class CloudResetPasswordRequest {
   @IsString()
@@ -21,4 +29,16 @@ export class CloudResetPasswordRequest {
     },
   )
   newPassword: string;
+
+  /** Issue one-time token so Workspace can auto-connect */
+  @IsOptional()
+  @Transform(({ value }) => value === true || value === 'true')
+  @IsBoolean()
+  issueHandoff?: boolean;
+
+  /** Set session cookies on the calling host (cloud.amscorp.id) */
+  @IsOptional()
+  @Transform(({ value }) => value === true || value === 'true')
+  @IsBoolean()
+  autoLogin?: boolean;
 }
