@@ -435,19 +435,13 @@ export class ProjectService {
   }
 
   async taskOwn(nik: string): Promise<ownTaskResponse[]> {
+    // Dashboard "My tasks": assigned to user AND not completed
     const tasks = await this.prismaService.dT_TASK.findMany({
       where: {
-        OR: [
-          { assignees: { some: { nik } } },
-          { createdBy: nik },
-          {
-            project: {
-              OR: [{ createdBy: nik }, { members: { some: { nik } } }],
-            },
-          },
-        ],
+        assignees: { some: { nik } },
+        status: false,
       },
-      orderBy: [{ status: 'asc' }, { createdAt: 'desc' }],
+      orderBy: [{ createdAt: 'desc' }],
       take: 300,
       select: {
         id: true,
