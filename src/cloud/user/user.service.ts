@@ -328,6 +328,34 @@ export class UserService {
     };
   }
 
+  async resetPassword(
+    nik: string,
+    password: string,
+    requirePasswordChange = true,
+  ) {
+    const user = await this.prisma.dT_USER.findUnique({ where: { nik } });
+    if (!user) throw new NotFoundException('User not found');
+    if (!password?.trim()) throw new BadRequestException('Password tidak boleh kosong');
+
+    const hashed = encodePassword(password.trim());
+    await this.prisma.dT_USER.update({
+      where: { nik },
+      data: {
+        password: hashed,
+        mustChangePassword: requirePasswordChange !== false,
+      },
+    });
+    await this.prisma.lOG_REFRESH_TOKEN.updateMany({
+      where: { nik, isRevoked: false },
+      data: { isRevoked: true },
+    });
+
+    return {
+      nik,
+      mustChangePassword: requirePasswordChange !== false,
+    };
+  }
+
   async softDeactivate(nik: string) {
     const user = await this.prisma.dT_USER.findUnique({ where: { nik } });
     if (!user) throw new NotFoundException('User not found');

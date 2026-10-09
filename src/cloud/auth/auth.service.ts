@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Injectable,
   Logger,
   NotFoundException,
@@ -6,19 +7,24 @@ import {
 } from '@nestjs/common';
 import { createHash, randomUUID } from 'crypto';
 import { CloudPrismaService } from '../prisma/prisma.service';
-import { comparePassword } from '../utils/bcrypt';
+import { comparePassword, encodePassword } from '../utils/bcrypt';
 import { LoginRequest } from './dto/request/loginRequest';
 import { LoginResponse } from './dto/response/loginResponse';
 import { JwtService } from '@nestjs/jwt';
 import { SuspendedUserException } from '../utils/suspendExecption';
 import { GetInfoUserResponse } from './dto/response/getInfoResponse';
 import { ConfigService } from '@nestjs/config';
+import { sendCloudResetPasswordEmail } from '../utils/brevo.mailer';
+import { ForgotPasswordRequest } from './dto/request/forgotPasswordRequest';
+import { CloudResetPasswordRequest } from './dto/request/resetPasswordRequest';
+import { ChangePasswordRequest } from './dto/request/changePasswordRequest';
 
 export interface JwtPayload {
   nik: string;
   nama: string;
   roleId: string;
   type?: 'access' | 'ws';
+  mustChangePassword?: boolean;
 }
 
 export interface RefreshTokenPayload {
@@ -98,7 +104,7 @@ export class AuthService {
   }
 
   async generateTokens(
-    user: { nik: string; nama: string; roleId: string },
+    user: { nik: string; nama: string; roleId: string; mustChangePassword?: boolean },
     familyId?: string,
     loginMeta?: { userAgent?: string },
   ): Promise<LoginResponse> {
@@ -122,11 +128,13 @@ export class AuthService {
       },
     });
 
+    const mustChange = !!user.mustChangePassword;
     const accessPayload: JwtPayload = {
       nik: user.nik,
       nama: user.nama,
       roleId: user.roleId,
       type: 'access',
+      mustChangePassword: mustChange,
     };
 
     const refreshPayload: RefreshTokenPayload = {
@@ -150,7 +158,7 @@ export class AuthService {
       }),
     ]);
 
-    return { token, refreshToken };
+    return { token, refreshToken, mustChangePassword: mustChange };
   }
 
   async validateUser(data: LoginRequest, userAgent?: string): Promise<LoginResponse> {
@@ -160,7 +168,12 @@ export class AuthService {
     }
     if (!user.statusActive) throw new SuspendedUserException();
     return this.generateTokens(
-      { nik: user.nik, nama: user.nama, roleId: user.roleId },
+      {
+        nik: user.nik,
+        nama: user.nama,
+        roleId: user.roleId,
+        mustChangePassword: !!user.mustChangePassword,
+      },
       undefined,
       { userAgent },
     );
@@ -219,53 +232,117 @@ export class AuthService {
     if (!user) throw new UnauthorizedException('User not found');
     if (!user.statusActive) throw new SuspendedUserException();
 
-    const newJti = randomUUID();
-    const newExpiresAt = new Date(Date.now() + this.getRefreshExpiresInMs());
+    await this.prisma.lOG_REFRESH_TOKEN.update({
+      where: { id: tokenRecord.id },
+      data: { isRevoked: true },
+    });
 
-    await this.prisma.$transaction([
-      this.prisma.lOG_REFRESH_TOKEN.update({
-        where: { id: tokenRecord.id },
-        data: { isRevoked: true },
-      }),
-      this.prisma.lOG_REFRESH_TOKEN.create({
-        data: {
-          id: newJti,
-          nik: user.nik,
-          family: tokenRecord.family,
-          isRevoked: false,
-          expiresAt: newExpiresAt,
-        },
-      }),
-    ]);
+    return this.generateTokens(
+      {
+        nik: user.nik,
+        nama: user.nama,
+        roleId: user.roleId,
+        mustChangePassword: !!user.mustChangePassword,
+      },
+      tokenRecord.family,
+    );
+  }
 
-    const accessPayload: JwtPayload = {
-      nik: user.nik,
-      nama: user.nama,
-      roleId: user.roleId,
-      type: 'access',
-    };
-    const refreshPayload: RefreshTokenPayload = {
-      nik: user.nik,
-      roleId: user.roleId,
-      jti: newJti,
-      family: tokenRecord.family,
-      type: 'refresh',
-    };
+  async revokeAllRefreshTokens(nik: string): Promise<void> {
+    await this.prisma.lOG_REFRESH_TOKEN.updateMany({
+      where: { nik, isRevoked: false },
+      data: { isRevoked: true },
+    });
+  }
 
-    const [token, newRefreshToken] = await Promise.all([
-      this.jwtService.signAsync(accessPayload, {
+  async changePassword(
+    nik: string,
+    data: ChangePasswordRequest,
+    userAgent?: string,
+  ): Promise<LoginResponse> {
+    const user = await this.prisma.dT_USER.findUnique({ where: { nik } });
+    if (!user) throw new NotFoundException('User not found');
+
+    if (!user.mustChangePassword) {
+      if (!data.currentPassword) {
+        throw new BadRequestException('Password lama wajib diisi');
+      }
+      const ok = await comparePassword(data.currentPassword, user.password);
+      if (!ok) throw new UnauthorizedException('Password lama salah');
+    }
+
+    if (await comparePassword(data.newPassword, user.password)) {
+      throw new BadRequestException('Password baru tidak boleh sama dengan password lama');
+    }
+
+    const password = encodePassword(data.newPassword);
+    await this.prisma.dT_USER.update({
+      where: { nik },
+      data: { password, mustChangePassword: false },
+    });
+    await this.revokeAllRefreshTokens(nik);
+
+    return this.generateTokens(
+      {
+        nik: user.nik,
+        nama: user.nama,
+        roleId: user.roleId,
+        mustChangePassword: false,
+      },
+      undefined,
+      { userAgent },
+    );
+  }
+
+  async sendForgotPassword({ nik }: ForgotPasswordRequest): Promise<string> {
+    const user = await this.prisma.dT_USER.findUnique({ where: { nik } });
+    if (!user) throw new NotFoundException('User tidak ditemukan');
+    if (!user.email?.trim()) {
+      throw new BadRequestException(
+        'Email belum terdaftar untuk akun ini. Hubungi admin Cloud Storage.',
+      );
+    }
+    if (!user.statusActive) throw new SuspendedUserException();
+
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+
+    const token = await this.jwtService.signAsync(
+      { otp, nik: user.nik, type: 'cloud_forgot' },
+      {
+        expiresIn: '15m' as any,
         secret: this.getAccessSecret(),
-        expiresIn: this.getAccessExpiresIn() as any,
         issuer: this.getIssuer(),
+      },
+    );
+
+    await this.prisma.lOG_FORGOT_PASSWORD.create({
+      data: { otp, nik: user.nik, expiresAt },
+    });
+
+    await sendCloudResetPasswordEmail(user.email, token, otp, user.nama);
+    return 'Kode reset password telah dikirim ke email Anda';
+  }
+
+  async resetPasswordWithOtp({ otp, newPassword }: CloudResetPasswordRequest): Promise<string> {
+    const row = await this.prisma.lOG_FORGOT_PASSWORD.findUnique({ where: { otp } });
+    if (!row || row.used || new Date() > new Date(row.expiresAt)) {
+      throw new BadRequestException('OTP tidak valid atau sudah kedaluwarsa');
+    }
+
+    const password = encodePassword(newPassword);
+    await this.prisma.$transaction([
+      this.prisma.dT_USER.update({
+        where: { nik: row.nik },
+        data: { password, mustChangePassword: false },
       }),
-      this.jwtService.signAsync(refreshPayload, {
-        secret: this.getRefreshSecret(),
-        expiresIn: this.getRefreshExpiresIn() as any,
-        issuer: this.getIssuer(),
+      this.prisma.lOG_FORGOT_PASSWORD.update({
+        where: { otp },
+        data: { used: true },
       }),
     ]);
-
-    return { token, refreshToken: newRefreshToken };
+    await this.revokeAllRefreshTokens(row.nik);
+    return 'Password berhasil diubah';
   }
 
   async revokeToken(refreshToken: string): Promise<void> {
@@ -303,6 +380,7 @@ export class AuthService {
         nama: true,
         roleId: true,
         photo: true,
+        mustChangePassword: true,
         quota: { select: { limitBytes: true, usedBytes: true } },
       },
     });
@@ -313,6 +391,7 @@ export class AuthService {
       nama: dbUser.nama,
       roleId: dbUser.roleId,
       photo: dbUser.photo,
+      mustChangePassword: !!dbUser.mustChangePassword,
       quota: dbUser.quota
         ? {
             limitBytes: dbUser.quota.limitBytes.toString(),

@@ -9,16 +9,17 @@ datasource db {
 }
 
 model DT_USER {
-  nik          String  @id @db.Char(8)
-  nama         String  @db.VarChar(40)
-  password     String  @db.VarChar(100)
-  noTelp       String? @db.VarChar(13)
-  email        String? @db.VarChar(100)
-  roleId       String  @db.VarChar(20)
-  handleWeb    Boolean @default(true)
-  statusActive Boolean @default(true)
-  photo        String? @db.VarChar(500)
-  departement  String? @db.VarChar(50)
+  nik                 String  @id @db.Char(8)
+  nama                String  @db.VarChar(40)
+  password            String  @db.VarChar(100)
+  noTelp              String? @db.VarChar(13)
+  email               String? @db.VarChar(100)
+  roleId              String  @db.VarChar(20)
+  handleWeb           Boolean @default(true)
+  statusActive        Boolean @default(true)
+  mustChangePassword  Boolean @default(false)
+  photo               String? @db.VarChar(500)
+  departement         String? @db.VarChar(50)
 
   role            DT_ROLE               @relation(fields: [roleId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   forgotPasswords LOG_FORGOT_PASSWORD[]

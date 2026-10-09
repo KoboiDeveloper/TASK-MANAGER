@@ -19,6 +19,7 @@ import { CommonResponse } from '../common/commonResponse';
 import { RegisterRequest } from './dto/request/registerRequest';
 import { UpdateQuotaRequest } from './dto/request/updateQuotaRequest';
 import { UpdateUserRequest } from './dto/request/updateUserRequest';
+import { ResetPasswordRequest } from './dto/request/resetPasswordRequest';
 import { handleException } from '../utils/handleException';
 
 @Controller('api/cloud/users')
@@ -108,6 +109,21 @@ export class UserController {
     try {
       const quota = await this.userService.updateQuota(nik, body.limitBytes);
       return new CommonResponse('Quota updated', HttpStatus.OK, quota);
+    } catch (err) {
+      return handleException(err);
+    }
+  }
+
+  @Patch(':nik/reset-password')
+  @Roles(ERole.SUPER, ERole.ADMIN)
+  async resetPassword(@Param('nik') nik: string, @Body() body: ResetPasswordRequest) {
+    try {
+      const result = await this.userService.resetPassword(
+        nik,
+        body.password,
+        body.requirePasswordChange !== false,
+      );
+      return new CommonResponse('Password reset', HttpStatus.OK, result);
     } catch (err) {
       return handleException(err);
     }

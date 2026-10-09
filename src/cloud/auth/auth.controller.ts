@@ -4,6 +4,7 @@ import {
   Get,
   HttpCode,
   HttpStatus,
+  Patch,
   Post,
   Req,
   Res,
@@ -16,6 +17,9 @@ import { CommonResponse } from '../common/commonResponse';
 import { LoginRequest } from './dto/request/loginRequest';
 import { LoginResponse } from './dto/response/loginResponse';
 import { RefreshTokenRequest } from './dto/request/refreshTokenRequest';
+import { ForgotPasswordRequest } from './dto/request/forgotPasswordRequest';
+import { CloudResetPasswordRequest } from './dto/request/resetPasswordRequest';
+import { ChangePasswordRequest } from './dto/request/changePasswordRequest';
 import { AuthGuard } from '../security/authGuard';
 import { handleException } from '../utils/handleException';
 
@@ -113,6 +117,53 @@ export class AuthController {
       if (token) await this.authService.revokeToken(token);
       this.clearAuthCookies(res);
       return new CommonResponse('Logged out successfully', HttpStatus.OK, 'Logged out successfully');
+    } catch (err) {
+      return handleException(err);
+    }
+  }
+
+  @Post('forgot-password')
+  @HttpCode(HttpStatus.OK)
+  async forgotPassword(@Body() body: ForgotPasswordRequest) {
+    try {
+      const message = await this.authService.sendForgotPassword(body);
+      return new CommonResponse(message, HttpStatus.OK, message);
+    } catch (err) {
+      return handleException(err);
+    }
+  }
+
+  @Post('reset-password')
+  @HttpCode(HttpStatus.OK)
+  async resetPassword(@Body() body: CloudResetPasswordRequest) {
+    try {
+      const message = await this.authService.resetPasswordWithOtp(body);
+      return new CommonResponse(message, HttpStatus.OK, message);
+    } catch (err) {
+      return handleException(err);
+    }
+  }
+
+  @UseGuards(AuthGuard)
+  @Patch('change-password')
+  @HttpCode(HttpStatus.OK)
+  async changePassword(
+    @Req() req: Request,
+    @Body() body: ChangePasswordRequest,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    try {
+      const user = req['user'] as { nik: string };
+      const ua = req.headers['user-agent'];
+      const result = await this.authService.changePassword(
+        user.nik,
+        body,
+        typeof ua === 'string' ? ua : undefined,
+      );
+      this.setAuthCookies(res, result);
+      return new CommonResponse('Password berhasil diubah', HttpStatus.OK, {
+        mustChangePassword: false,
+      });
     } catch (err) {
       return handleException(err);
     }

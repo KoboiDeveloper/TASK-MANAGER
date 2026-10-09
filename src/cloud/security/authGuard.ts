@@ -10,6 +10,7 @@ interface JwtPayload {
   nama: string;
   roleId: string;
   type?: string;
+  mustChangePassword?: boolean;
 }
 
 interface AuthenticatedRequest extends Request {
