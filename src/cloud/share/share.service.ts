@@ -10,6 +10,7 @@ import { DriveService } from '../drive/drive.service';
 import { DropboxStorageService } from '../storage/dropbox.storage.service';
 import { comparePassword, encodePassword } from '../utils/bcrypt';
 import { randomBytes } from 'crypto';
+import { PushService } from '../../notifications/push.service';
 
 @Injectable()
 export class ShareService {
@@ -17,6 +18,7 @@ export class ShareService {
     private prisma: CloudPrismaService,
     private driveService: DriveService,
     private storage: DropboxStorageService,
+    private pushService: PushService,
   ) {}
 
   async listShares(nik: string, itemId: string, itemType: 'FILE' | 'FOLDER') {
@@ -66,12 +68,51 @@ export class ShareService {
       },
     });
 
+    // Native / in-app notify for the recipient (Socket.IO + Web Push)
+    void this.notifyShareTarget(nik, targetNik, itemId, itemType).catch(() => undefined);
+
     return {
       id: share.id,
       permission: share.permission,
       createdAt: share.createdAt,
       user: share.target,
     };
+  }
+
+  private async notifyShareTarget(
+    sharerNik: string,
+    targetNik: string,
+    itemId: string,
+    itemType: 'FILE' | 'FOLDER',
+  ): Promise<void> {
+    const sharer = await this.prisma.dT_USER.findUnique({
+      where: { nik: sharerNik },
+      select: { nama: true },
+    });
+    const sharerName = sharer?.nama?.trim() || sharerNik;
+
+    let itemName = itemType === 'FOLDER' ? 'Folder' : 'File';
+    if (itemType === 'FOLDER') {
+      const folder = await this.prisma.dT_FOLDER.findUnique({
+        where: { id: itemId },
+        select: { name: true },
+      });
+      if (folder?.name) itemName = folder.name;
+    } else {
+      const file = await this.prisma.dT_FILE.findUnique({
+        where: { id: itemId },
+        select: { name: true },
+      });
+      if (file?.name) itemName = file.name;
+    }
+
+    this.pushService.notifyUser(targetNik, {
+      type: 'cloud.item_shared',
+      title: itemType === 'FOLDER' ? 'Folder dibagikan' : 'File dibagikan',
+      body: `${sharerName}: ${itemName}`,
+      url: '/dashboard/cloud',
+      tag: `cloud-share-${itemType}-${itemId}`,
+    });
   }
 
   async removeShare(nik: string, shareId: string) {

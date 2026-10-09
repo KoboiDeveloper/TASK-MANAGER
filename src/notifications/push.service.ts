@@ -1,18 +1,25 @@
 import { createHash } from 'crypto';
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, ModuleRef, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import webpush from 'web-push';
 import { PrismaService } from '../prisma/prisma.service';
+import { ChatEvents } from '../chat/chat.events';
 import { isPushAllowed, PushPayload } from './push.types';
+
+const REALTIME_EVENT = 'notification:push';
 
 @Injectable()
 export class PushService implements OnModuleInit {
   private readonly logger = new Logger(PushService.name);
   private ready = false;
+  /** Cached once ChatModule is available */
+  private chatEvents: ChatEvents | null = null;
+  private chatEventsResolved = false;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
+    private readonly moduleRef: ModuleRef,
   ) {}
 
   onModuleInit() {
@@ -20,7 +27,7 @@ export class PushService implements OnModuleInit {
     const privateKey = this.config.get<string>('VAPID_PRIVATE_KEY');
     const subject = this.config.get<string>('VAPID_SUBJECT') || 'mailto:admin@taskmanager.local';
     if (!publicKey || !privateKey) {
-      this.logger.warn('VAPID keys missing — Web Push disabled');
+      this.logger.warn('VAPID keys missing — Web Push disabled (socket realtime still works)');
       return;
     }
     webpush.setVapidDetails(subject, publicKey, privateKey);
@@ -83,9 +90,46 @@ export class PushService implements OnModuleInit {
     for (const nik of unique) this.notifyUser(nik, payload);
   }
 
-  async sendToUser(nik: string, payload: PushPayload): Promise<void> {
-    if (!this.ready) return;
+  private resolveChatEvents(): ChatEvents | null {
+    if (this.chatEvents) return this.chatEvents;
+    try {
+      this.chatEvents = this.moduleRef.get(ChatEvents, { strict: false }) ?? null;
+    } catch {
+      this.chatEvents = null;
+    }
+    if (!this.chatEvents && !this.chatEventsResolved) {
+      this.chatEventsResolved = true;
+      this.logger.warn('ChatEvents unavailable — will retry on next notify');
+    }
+    if (this.chatEvents) this.chatEventsResolved = true;
+    return this.chatEvents;
+  }
 
+  /**
+   * Emit to online Electron/web clients via Socket.IO user room.
+   * Skips chat.* — chat already drives native toast from room:updated.
+   */
+  private emitRealtime(nik: string, payload: PushPayload, url: string): void {
+    if (payload.type.startsWith('chat.')) return;
+    const events = this.resolveChatEvents();
+    if (!events) return;
+    try {
+      events.emitToUser(nik, REALTIME_EVENT, {
+        title: payload.title,
+        body: payload.body,
+        url,
+        tag: payload.tag || payload.type,
+        type: payload.type,
+      });
+      this.logger.log(`realtime ${REALTIME_EVENT} ${payload.type} → ${nik}`);
+    } catch (err) {
+      this.logger.warn(
+        `realtime emit failed ${payload.type} → ${nik}: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  async sendToUser(nik: string, payload: PushPayload): Promise<void> {
     const user = await this.prisma.dT_USER.findUnique({
       where: { nik },
       select: { notificationPrefs: true, statusActive: true },
@@ -93,10 +137,16 @@ export class PushService implements OnModuleInit {
     if (!user?.statusActive) return;
     if (!isPushAllowed(user.notificationPrefs, payload.type)) return;
 
+    const url = payload.url || '/dashboard';
+
+    // Always try realtime for open desktop/web tabs (Electron needs this path)
+    this.emitRealtime(nik, payload, url);
+
+    if (!this.ready) return;
+
     const subs = await this.prisma.dT_PUSH_SUBSCRIPTION.findMany({ where: { nik } });
     if (!subs.length) return;
 
-    const url = payload.url || '/dashboard';
     const body = JSON.stringify({
       title: payload.title,
       body: payload.body,

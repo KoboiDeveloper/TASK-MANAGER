@@ -4,7 +4,9 @@ export type PushCategory =
   | 'pushProject'
   | 'pushTicket'
   | 'pushDigest'
-  | 'pushAccount';
+  | 'pushAccount'
+  | 'pushMail'
+  | 'pushCloud';
 
 export type PushPayload = {
   type: string;
@@ -55,6 +57,10 @@ export const PUSH_TYPE_CATEGORY: Record<string, PushCategory> = {
   'account.new_device_login': 'pushAccount',
   'account.deactivated': 'pushAccount',
   'account.role_changed': 'pushAccount',
+
+  'mail.new_message': 'pushMail',
+
+  'cloud.item_shared': 'pushCloud',
 };
 
 export function checkNotificationPref(
