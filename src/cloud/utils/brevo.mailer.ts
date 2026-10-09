@@ -1,11 +1,13 @@
 import { Logger } from '@nestjs/common';
 
 type BrevoEmailPayload = {
-  to: string;
+  to: string | string[];
   toName?: string;
   subject: string;
   html: string;
   text?: string;
+  fromName?: string;
+  fromEmail?: string;
 };
 
 type BrevoConfig = {
@@ -22,13 +24,16 @@ function getBrevoConfig(): BrevoConfig {
     throw new Error('BREVO_API_KEY belum dikonfigurasi');
   }
 
-  const from = process.env.BREVO_FROM_EMAIL?.trim();
+  const from =
+    process.env.BREVO_FROM_EMAIL?.trim() ||
+    process.env.SMTP_FROM_EMAIL?.trim();
   if (!from) {
     throw new Error('BREVO_FROM_EMAIL belum dikonfigurasi');
   }
 
   const fromName =
     process.env.BREVO_FROM_NAME?.trim() ||
+    process.env.SMTP_FROM_NAME?.trim() ||
     process.env.CLOUD_BREVO_FROM_NAME?.trim() ||
     'Cloud Storage AMS';
 
@@ -38,6 +43,18 @@ function getBrevoConfig(): BrevoConfig {
 export async function sendBrevoEmail(payload: BrevoEmailPayload): Promise<void> {
   const config = getBrevoConfig();
 
+  const emails = (Array.isArray(payload.to) ? payload.to : [payload.to])
+    .map((e) => e?.trim())
+    .filter((e): e is string => Boolean(e));
+  if (!emails.length) {
+    throw new Error('Brevo: penerima email kosong');
+  }
+
+  const to =
+    emails.length === 1 && payload.toName
+      ? [{ email: emails[0], name: payload.toName }]
+      : emails.map((email) => ({ email }));
+
   const response = await fetch('https://api.brevo.com/v3/smtp/email', {
     method: 'POST',
     headers: {
@@ -46,8 +63,11 @@ export async function sendBrevoEmail(payload: BrevoEmailPayload): Promise<void> 
       'api-key': config.apiKey,
     },
     body: JSON.stringify({
-      sender: { name: config.fromName, email: config.from },
-      to: [{ email: payload.to, name: payload.toName ?? payload.to }],
+      sender: {
+        name: payload.fromName?.trim() || config.fromName,
+        email: payload.fromEmail?.trim() || config.from,
+      },
+      to,
       subject: payload.subject,
       htmlContent: payload.html,
       textContent: payload.text,
@@ -105,5 +125,9 @@ export async function sendCloudResetPasswordEmail(
     subject: 'Reset Password — Cloud Storage AMS',
     html,
     text: `OTP Cloud Storage: ${otp}. Atau buka: ${resetUrl}`,
+    fromName:
+      process.env.CLOUD_BREVO_FROM_NAME?.trim() ||
+      process.env.BREVO_FROM_NAME?.trim() ||
+      'Cloud Storage AMS',
   });
 }
