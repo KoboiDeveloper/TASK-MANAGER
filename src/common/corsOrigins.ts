@@ -2,6 +2,7 @@ export function getAllowedOrigins(): string[] {
   return [
     'https://task-manager-fe-lyart.vercel.app',
     'https://workspace.amscorp.id',
+    'https://cloud.amscorp.id',
     'http://localhost:3000',
     'http://127.0.0.1:3000',
     'http://localhost:3100',
@@ -20,6 +21,7 @@ export function isOriginAllowed(origin?: string | null): boolean {
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
     const host = u.hostname;
     if (host === 'localhost' || host === '127.0.0.1') return true;
+    if (host === 'amscorp.id' || host.endsWith('.amscorp.id')) return true;
     // private LAN
     if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
     if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
