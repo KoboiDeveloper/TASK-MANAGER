@@ -324,6 +324,14 @@ export class AuthService {
     return 'Kode reset password telah dikirim ke email Anda';
   }
 
+  async verifyOtp(otp: string): Promise<{ nik: string; valid: boolean }> {
+    const row = await this.prisma.lOG_FORGOT_PASSWORD.findUnique({ where: { otp } });
+    if (!row || row.used || new Date() > new Date(row.expiresAt)) {
+      throw new BadRequestException('OTP tidak valid atau sudah kedaluwarsa');
+    }
+    return { nik: row.nik, valid: true };
+  }
+
   async resetPasswordWithOtp(data: CloudResetPasswordRequest): Promise<{
     message: string;
     nik: string;

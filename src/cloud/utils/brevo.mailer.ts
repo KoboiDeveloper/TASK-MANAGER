@@ -98,7 +98,7 @@ export async function sendCloudResetPasswordEmail(
     process.env.CLOUD_FRONTEND_URL?.replace(/\/$/, '') || 'https://cloud.amscorp.id';
   const qs = new URLSearchParams({ verifylink: token });
   if (from === 'workspace') qs.set('from', 'workspace');
-  const resetUrl = `${base}/reset-password?${qs.toString()}`;
+  const resetUrl = `${base}/forgot-password?${qs.toString()}`;
 
   const html = `
   <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden;">

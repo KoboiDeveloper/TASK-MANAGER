@@ -19,6 +19,7 @@ import { LoginResponse } from './dto/response/loginResponse';
 import { RefreshTokenRequest } from './dto/request/refreshTokenRequest';
 import { ForgotPasswordRequest } from './dto/request/forgotPasswordRequest';
 import { CloudResetPasswordRequest } from './dto/request/resetPasswordRequest';
+import { VerifyOtpRequest } from './dto/request/verifyOtpRequest';
 import { WorkspaceHandoffRedeemRequest } from './dto/request/workspaceHandoffRequest';
 import { ChangePasswordRequest } from './dto/request/changePasswordRequest';
 import { AuthGuard } from '../security/authGuard';
@@ -129,6 +130,17 @@ export class AuthController {
     try {
       const message = await this.authService.sendForgotPassword(body);
       return new CommonResponse(message, HttpStatus.OK, message);
+    } catch (err) {
+      return handleException(err);
+    }
+  }
+
+  @Post('verify-otp')
+  @HttpCode(HttpStatus.OK)
+  async verifyOtp(@Body() body: VerifyOtpRequest) {
+    try {
+      const result = await this.authService.verifyOtp(body.otp);
+      return new CommonResponse('OTP valid', HttpStatus.OK, result);
     } catch (err) {
       return handleException(err);
     }
