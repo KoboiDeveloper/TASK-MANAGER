@@ -2,12 +2,14 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { MailerService } from '@nestjs-modules/mailer';
 import { ConfigService } from '@nestjs/config';
+import { sendBrevoEmail } from '../../cloud/utils/brevo.mailer';
 
 @Injectable()
 export class MailService implements OnModuleInit {
   private readonly logger = new Logger(MailService.name);
   private readonly fromName: string;
   private readonly fromEmail: string;
+  private readonly useBrevoApi: boolean;
   readonly domain: string;
 
   constructor(
@@ -19,14 +21,24 @@ export class MailService implements OnModuleInit {
         ? (process.env.FRONTEND_URL as string)
         : (process.env.FRONTEND_URL ?? 'http://localhost:3000');
 
-    this.fromName = this.cfg.get<string>('SMTP_FROM_NAME') || 'Task Manager';
+    this.fromName =
+      this.cfg.get<string>('BREVO_FROM_NAME') ||
+      this.cfg.get<string>('SMTP_FROM_NAME') ||
+      'PM-AMS';
     this.fromEmail =
+      this.cfg.get<string>('BREVO_FROM_EMAIL') ||
       this.cfg.get<string>('SMTP_FROM_EMAIL') ||
       this.cfg.get<string>('SMTP_USER') ||
       'no-reply@example.com';
+    this.useBrevoApi = Boolean(this.cfg.get<string>('BREVO_API_KEY')?.trim());
   }
 
   async onModuleInit() {
+    if (this.useBrevoApi) {
+      this.logger.log(`Mail provider: Brevo API (from ${this.fromEmail})`);
+      return;
+    }
+
     try {
       // Ambil transporter tanpa tipe 'any'
       const transporter: unknown = (this.mailer as unknown as { transporter?: unknown })
@@ -44,11 +56,39 @@ export class MailService implements OnModuleInit {
 
       if (hasVerify(transporter)) {
         await transporter.verify();
-        this.logger.log('SMTP transporter verified.');
+        this.logger.log('SMTP transporter verified (Brevo relay / SMTP).');
       }
     } catch (e) {
       this.logger.warn(`SMTP verify failed: ${(e as Error)?.message ?? String(e)}`);
     }
+  }
+
+  /** Kirim via Brevo API bila BREVO_API_KEY ada; selain itu SMTP (Brevo relay). */
+  private async deliver(opts: {
+    to: string | string[];
+    subject: string;
+    html: string;
+    text?: string;
+  }): Promise<void> {
+    if (this.useBrevoApi) {
+      await sendBrevoEmail({
+        to: opts.to,
+        subject: opts.subject,
+        html: opts.html,
+        text: opts.text,
+        fromName: this.fromName,
+        fromEmail: this.fromEmail,
+      });
+      return;
+    }
+
+    await this.mailer.sendMail({
+      from: `"${this.fromName}" <${this.fromEmail}>`,
+      to: opts.to,
+      subject: opts.subject,
+      html: opts.html,
+      text: opts.text,
+    });
   }
 
   // =========================================================
@@ -167,8 +207,7 @@ export class MailService implements OnModuleInit {
   `;
 
     try {
-      await this.mailer.sendMail({
-        from: `"${this.fromName}" <${this.fromEmail}>`,
+      await this.deliver({
         to,
         subject: 'Reset Password',
         html: htmlContent,
@@ -227,8 +266,7 @@ export class MailService implements OnModuleInit {
   `;
 
     try {
-      await this.mailer.sendMail({
-        from: `"${this.fromName}" <${this.fromEmail}>`,
+      await this.deliver({
         to: recipients,
         subject: 'Keamanan Akun: Kata Sandi Anda Telah Diperbarui',
         html: htmlContent,
@@ -319,8 +357,7 @@ export class MailService implements OnModuleInit {
     const subject = `Anda telah bergabung di project "${projectNameEsc}"`;
 
     try {
-      await this.mailer.sendMail({
-        from: `"${this.fromName}" <${this.fromEmail}>`,
+      await this.deliver({
         to: recipients,
         subject,
         html: htmlContent,
@@ -430,8 +467,7 @@ export class MailService implements OnModuleInit {
     const subject = `Peran Anda di project "${projectNameEsc}" telah diubah`;
 
     try {
-      await this.mailer.sendMail({
-        from: `"${this.fromName}" <${this.fromEmail}>`,
+      await this.deliver({
         to: recipients,
         subject,
         html: htmlContent,
@@ -498,8 +534,7 @@ export class MailService implements OnModuleInit {
     const subject = `Akses Anda ke project "${projectNameEsc}" telah dicabut`;
 
     try {
-      await this.mailer.sendMail({
-        from: `"${this.fromName}" <${this.fromEmail}>`,
+      await this.deliver({
         to: recipients,
         subject,
         html: htmlContent,
@@ -598,8 +633,7 @@ export class MailService implements OnModuleInit {
     const subject = `Anda ditugaskan pada ${itemLabel.toLowerCase()} "${taskNameEsc}" di project "${projectNameEsc}"`;
 
     try {
-      await this.mailer.sendMail({
-        from: `"${this.fromName}" <${this.fromEmail}>`,
+      await this.deliver({
         to: recipients,
         subject,
         html: htmlContent,
@@ -734,8 +768,7 @@ export class MailService implements OnModuleInit {
       : `⏰ [REMINDER] Task "${taskNameEsc}" jatuh tempo (${badgeText})`;
 
     try {
-      await this.mailer.sendMail({
-        from: `"${this.fromName}" <${this.fromEmail}>`,
+      await this.deliver({
         to: recipients,
         subject,
         html: htmlContent,
@@ -913,8 +946,7 @@ export class MailService implements OnModuleInit {
     const subject = `☀️ [Daily Briefing] Rangkuman Tugas Anda (${todayStr}) - ${overdue.length} Overdue, ${dueToday.length} Hari Ini`;
 
     try {
-      await this.mailer.sendMail({
-        from: `"${this.fromName}" <${this.fromEmail}>`,
+      await this.deliver({
         to,
         subject,
         html: htmlContent,
@@ -997,8 +1029,7 @@ export class MailService implements OnModuleInit {
     const subject = `🎉 Selamat! Seluruh task di project "${projectNameEsc}" telah selesai (100%)`;
 
     try {
-      await this.mailer.sendMail({
-        from: `"${this.fromName}" <${this.fromEmail}>`,
+      await this.deliver({
         to: recipients,
         subject,
         html: htmlContent,
