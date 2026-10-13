@@ -10,10 +10,12 @@ import { PrismaService } from '../prisma/prisma.service';
 import {
   AddSubTaskRequest,
   CreateProjectRequest,
+  CreateTaskCommentRequest,
   CreateTaskProjectRequest,
   MemberRequest,
   RemoveSectionArgs,
   SyncSubTaskAssigneeRequest,
+  ToggleTaskCommentReactionRequest,
   UpdateProjectRequest,
   UpdateSubTaskRequest,
   UpdateTaskRequest,
@@ -34,6 +36,9 @@ import {
   TaskNonSection,
   TaskSectionResponse,
   AttachmentTask,
+  ProjectGalleryFile,
+  ProjectGalleryItem,
+  ProjectGalleryComment,
   ownTaskResponse,
   ActivityResponse,
 } from './dto/response';
@@ -869,6 +874,173 @@ export class ProjectService {
       );
       throw new ConflictException(e instanceof Error ? e.message : 'Failed to delete task');
     }
+  }
+
+  private parseTaskCustomFields(raw: unknown): Record<string, unknown> {
+    if (!raw) return {};
+    if (typeof raw === 'object' && raw !== null && !Array.isArray(raw)) {
+      return { ...(raw as Record<string, unknown>) };
+    }
+    if (typeof raw === 'string') {
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          return { ...(parsed as Record<string, unknown>) };
+        }
+      } catch {
+        return {};
+      }
+    }
+    return {};
+  }
+
+  async setTaskCover(
+    taskId: string,
+    file: Express.Multer.File,
+    nik?: string,
+  ): Promise<{ coverUrl: string; coverPath: string; customFields: string }> {
+    const tid = (await this.resolveTaskId(taskId)) || this.normalizeGuid(taskId);
+    if (!tid) {
+      throw new NotFoundException(`Task ${taskId} not found`);
+    }
+    if (!file) {
+      throw new BadRequestException('No cover image uploaded');
+    }
+
+    const allowed = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/jpg'];
+    if (!allowed.includes((file.mimetype || '').toLowerCase())) {
+      throw new BadRequestException('Cover must be an image (jpeg, png, webp, gif)');
+    }
+    const maxBytes = 5 * 1024 * 1024;
+    if (file.size > maxBytes) {
+      throw new BadRequestException('Cover image must be 5 MB or smaller');
+    }
+
+    const task = await this.prismaService.dT_TASK.findUnique({
+      where: { id: tid },
+      select: {
+        id: true,
+        name: true,
+        customFields: true,
+        id_dt_project: true,
+        createdBy: true,
+      },
+    });
+    if (!task) {
+      throw new NotFoundException(`Task ${taskId} not found`);
+    }
+
+    const existing = this.parseTaskCustomFields(task.customFields);
+    const oldPath =
+      typeof existing.coverPath === 'string'
+        ? existing.coverPath
+        : typeof existing.coverUrl === 'string'
+          ? existing.coverUrl
+          : null;
+
+    const ext =
+      (file.originalname || '').split('.').pop()?.toLowerCase().replace(/[^a-z0-9]/g, '') ||
+      'jpg';
+    const key = `tasks/${tid}/cover-${Date.now()}.${ext}`;
+    const uploaded = await this.storageService.uploadFile(key, file.buffer, file.mimetype);
+
+    const nextFields = {
+      ...existing,
+      coverUrl: uploaded.url,
+      coverPath: uploaded.path,
+    };
+    const customFields = JSON.stringify(nextFields);
+
+    await this.prismaService.dT_TASK.update({
+      where: { id: tid },
+      data: { customFields },
+    });
+
+    if (oldPath && oldPath !== uploaded.path && oldPath !== uploaded.url) {
+      try {
+        await this.storageService.deleteFile(oldPath);
+      } catch {
+        // ignore stale Dropbox delete failures
+      }
+    }
+
+    if (task.id_dt_project) {
+      await this.logActivity({
+        projectId: task.id_dt_project,
+        taskid: tid,
+        nik: nik || task.createdBy,
+        action: 'TASK_COVER_UPDATED',
+        details: { taskName: task.name },
+      });
+    }
+
+    return {
+      coverUrl: uploaded.url,
+      coverPath: uploaded.path,
+      customFields,
+    };
+  }
+
+  async clearTaskCover(
+    taskId: string,
+    nik?: string,
+  ): Promise<{ customFields: string | null }> {
+    const tid = (await this.resolveTaskId(taskId)) || this.normalizeGuid(taskId);
+    if (!tid) {
+      throw new NotFoundException(`Task ${taskId} not found`);
+    }
+
+    const task = await this.prismaService.dT_TASK.findUnique({
+      where: { id: tid },
+      select: {
+        id: true,
+        name: true,
+        customFields: true,
+        id_dt_project: true,
+        createdBy: true,
+      },
+    });
+    if (!task) {
+      throw new NotFoundException(`Task ${taskId} not found`);
+    }
+
+    const existing = this.parseTaskCustomFields(task.customFields);
+    const oldPath =
+      typeof existing.coverPath === 'string'
+        ? existing.coverPath
+        : typeof existing.coverUrl === 'string'
+          ? existing.coverUrl
+          : null;
+
+    delete existing.coverUrl;
+    delete existing.coverPath;
+    const customFields =
+      Object.keys(existing).length > 0 ? JSON.stringify(existing) : null;
+
+    await this.prismaService.dT_TASK.update({
+      where: { id: tid },
+      data: { customFields },
+    });
+
+    if (oldPath) {
+      try {
+        await this.storageService.deleteFile(oldPath);
+      } catch {
+        // ignore
+      }
+    }
+
+    if (task.id_dt_project) {
+      await this.logActivity({
+        projectId: task.id_dt_project,
+        taskid: tid,
+        nik: nik || task.createdBy,
+        action: 'TASK_COVER_REMOVED',
+        details: { taskName: task.name },
+      });
+    }
+
+    return { customFields };
   }
 
   async AddTaskAttachments(
@@ -3665,5 +3837,636 @@ export class ProjectService {
     } catch (err) {
       this.logger.warn(`Failed checking project completion email: ${err}`);
     }
+  }
+
+  // ====== TASK COMMENTS ======
+  private static readonly THUMBS_EMOJI = '👍';
+
+  private mapTaskComment(
+    row: {
+      id: string;
+      authorNik: string;
+      body: string;
+      createdAt: Date;
+      author: { nama: string | null } | null;
+      reactions: { emoji: string; nik: string }[];
+    },
+    viewerNik: string,
+  ) {
+    const viewer = (viewerNik || '').trim();
+    const byEmoji = new Map<string, { count: number; reacted: boolean }>();
+    for (const r of row.reactions) {
+      const emoji = (r.emoji || '').trim();
+      if (!emoji) continue;
+      const cur = byEmoji.get(emoji) ?? { count: 0, reacted: false };
+      cur.count += 1;
+      if (r.nik.trim() === viewer) cur.reacted = true;
+      byEmoji.set(emoji, cur);
+    }
+
+    const thumbs = byEmoji.get(ProjectService.THUMBS_EMOJI);
+    const reactions = [...byEmoji.entries()]
+      .filter(([emoji]) => emoji !== ProjectService.THUMBS_EMOJI)
+      .map(([emoji, v]) => ({ emoji, count: v.count, reacted: v.reacted }))
+      .sort((a, b) => b.count - a.count || a.emoji.localeCompare(b.emoji));
+
+    const my = row.reactions.find((r) => r.nik.trim() === viewer);
+
+    return {
+      id: row.id,
+      authorNik: row.authorNik.trim(),
+      authorName: row.author?.nama?.trim() || row.authorNik.trim(),
+      body: row.body,
+      createdAt: row.createdAt.toISOString(),
+      liked: Boolean(thumbs?.reacted),
+      likeCount: thumbs?.count ?? 0,
+      myEmoji: my?.emoji?.trim() || null,
+      reactions,
+    };
+  }
+
+  async listTaskComments(taskId: string, viewerNik: string) {
+    const tid = (await this.resolveTaskId(taskId)) || this.normalizeGuid(taskId);
+    if (!tid) throw new NotFoundException(`Task ${taskId} not found`);
+
+    const task = await this.prismaService.dT_TASK.findUnique({
+      where: { id: tid },
+      select: { id: true },
+    });
+    if (!task) throw new NotFoundException(`Task ${taskId} not found`);
+
+    const rows = await this.prismaService.dT_TASK_COMMENT.findMany({
+      where: { taskId: tid },
+      orderBy: { createdAt: 'desc' },
+      include: {
+        author: { select: { nama: true } },
+        reactions: { select: { emoji: true, nik: true } },
+      },
+    });
+
+    return rows.map((r) => this.mapTaskComment(r, viewerNik));
+  }
+
+  async createTaskComment(taskId: string, nik: string, dto: CreateTaskCommentRequest) {
+    const tid = (await this.resolveTaskId(taskId)) || this.normalizeGuid(taskId);
+    if (!tid) throw new NotFoundException(`Task ${taskId} not found`);
+    if (!nik?.trim()) throw new BadRequestException('User nik required');
+
+    const body = (dto.body || '').trim();
+    if (!body) throw new BadRequestException('Comment body is required');
+    if (body.length > 2000) throw new BadRequestException('Comment too long');
+
+    const task = await this.prismaService.dT_TASK.findUnique({
+      where: { id: tid },
+      select: { id: true },
+    });
+    if (!task) throw new NotFoundException(`Task ${taskId} not found`);
+
+    const created = await this.prismaService.dT_TASK_COMMENT.create({
+      data: {
+        taskId: tid,
+        authorNik: nik.trim(),
+        body,
+      },
+      include: {
+        author: { select: { nama: true } },
+        reactions: { select: { emoji: true, nik: true } },
+      },
+    });
+
+    return this.mapTaskComment(created, nik);
+  }
+
+  async toggleTaskCommentReaction(
+    commentId: string,
+    nik: string,
+    dto: ToggleTaskCommentReactionRequest,
+  ) {
+    if (!nik?.trim()) throw new BadRequestException('User nik required');
+    const emoji = (dto.emoji || '').trim();
+    if (!emoji) throw new BadRequestException('Emoji is required');
+    if (emoji.length > 16) throw new BadRequestException('Emoji too long');
+
+    const comment = await this.prismaService.dT_TASK_COMMENT.findUnique({
+      where: { id: commentId },
+      select: { id: true, taskId: true },
+    });
+    if (!comment) throw new NotFoundException('Comment not found');
+
+    const existing = await this.prismaService.dT_TASK_COMMENT_REACTION.findUnique({
+      where: { commentId_nik: { commentId, nik: nik.trim() } },
+    });
+
+    if (existing) {
+      if (existing.emoji === emoji) {
+        // same emot → remove
+        await this.prismaService.dT_TASK_COMMENT_REACTION.delete({
+          where: { id: existing.id },
+        });
+      } else {
+        // different emot → update (satu user satu emot)
+        await this.prismaService.dT_TASK_COMMENT_REACTION.update({
+          where: { id: existing.id },
+          data: { emoji },
+        });
+      }
+    } else {
+      await this.prismaService.dT_TASK_COMMENT_REACTION.create({
+        data: { commentId, nik: nik.trim(), emoji },
+      });
+    }
+
+    const refreshed = await this.prismaService.dT_TASK_COMMENT.findUnique({
+      where: { id: commentId },
+      include: {
+        author: { select: { nama: true } },
+        reactions: { select: { emoji: true, nik: true } },
+      },
+    });
+    if (!refreshed) throw new NotFoundException('Comment not found');
+    return this.mapTaskComment(refreshed, nik);
+  }
+
+  // =========================================================
+  //  PROJECT GALLERY (items / multi-files / comments → Dropbox)
+  // =========================================================
+
+  private mapGalleryFile(
+    r: {
+      id: string;
+      itemId: string;
+      projectId: string;
+      viewId: string | null;
+      url: string;
+      dropboxPath: string;
+      filename: string;
+      mimeType: string;
+      bytes: number;
+      sortOrder: number;
+      createdBy: string;
+      createdAt: Date;
+      note: string | null;
+      uploader?: { nama: string } | null;
+    },
+    projectIdPublic: string,
+  ): ProjectGalleryFile {
+    return {
+      id: r.id,
+      itemId: r.itemId,
+      projectId: projectIdPublic,
+      viewId: r.viewId,
+      url: r.url,
+      dropboxPath: r.dropboxPath,
+      filename: r.filename,
+      mimeType: r.mimeType,
+      bytes: r.bytes,
+      sortOrder: r.sortOrder,
+      createdBy: r.createdBy,
+      createdByName: r.uploader?.nama || r.createdBy,
+      createdAt: r.createdAt,
+      note: r.note,
+    };
+  }
+
+  private mapGalleryComment(
+    c: {
+      id: string;
+      authorNik: string;
+      body: string;
+      createdAt: Date;
+      author?: { nama: string } | null;
+      reactions: { emoji: string; nik: string }[];
+    },
+    viewerNik?: string,
+  ): ProjectGalleryComment {
+    const viewer = viewerNik?.trim() || '';
+    const byEmoji = new Map<string, { count: number; reacted: boolean }>();
+    for (const r of c.reactions) {
+      const cur = byEmoji.get(r.emoji) || { count: 0, reacted: false };
+      cur.count += 1;
+      if (viewer && r.nik === viewer) cur.reacted = true;
+      byEmoji.set(r.emoji, cur);
+    }
+    const reactions = Array.from(byEmoji.entries()).map(([emoji, v]) => ({
+      emoji,
+      count: v.count,
+      reacted: v.reacted,
+    }));
+    const thumbs = reactions.find((r) => r.emoji === '👍');
+    const mine = c.reactions.find((r) => r.nik === viewer);
+    return {
+      id: c.id,
+      authorNik: c.authorNik,
+      authorName: c.author?.nama || c.authorNik,
+      body: c.body,
+      createdAt: c.createdAt.toISOString(),
+      liked: !!thumbs?.reacted,
+      likeCount: thumbs?.count || 0,
+      myEmoji: mine?.emoji || null,
+      reactions,
+    };
+  }
+
+  async listProjectGalleryItems(projectId: string): Promise<ProjectGalleryItem[]> {
+    const pid = (await this.resolveProjectId(projectId)) || this.normalizeGuid(projectId);
+    if (!pid) throw new BadRequestException('Invalid projectId');
+    await this.ensureProjectExists(pid);
+
+    const rows = await this.prismaService.dT_PROJECT_GALLERY_ITEM.findMany({
+      where: { projectId: pid },
+      orderBy: { createdAt: 'desc' },
+      include: {
+        creator: { select: { nama: true } },
+        files: {
+          orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
+          include: { uploader: { select: { nama: true } } },
+        },
+        _count: { select: { comments: true } },
+      },
+    });
+
+    return rows.map((r) => ({
+      id: r.id,
+      projectId,
+      viewId: r.viewId,
+      title: r.title,
+      description: r.description,
+      createdBy: r.createdBy,
+      createdByName: r.creator?.nama || r.createdBy,
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+      commentCount: r._count.comments,
+      files: r.files.map((f) => this.mapGalleryFile(f, projectId)),
+    }));
+  }
+
+  async getProjectGalleryItem(
+    projectId: string,
+    itemId: string,
+    nik?: string,
+  ): Promise<ProjectGalleryItem & { comments: ProjectGalleryComment[] }> {
+    const pid = (await this.resolveProjectId(projectId)) || this.normalizeGuid(projectId);
+    const iid = this.normalizeGuid(itemId);
+    if (!pid || !iid) throw new BadRequestException('Invalid id');
+
+    const item = await this.prismaService.dT_PROJECT_GALLERY_ITEM.findFirst({
+      where: { id: iid, projectId: pid },
+      include: {
+        creator: { select: { nama: true } },
+        files: {
+          orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
+          include: { uploader: { select: { nama: true } } },
+        },
+        comments: {
+          orderBy: { createdAt: 'asc' },
+          include: {
+            author: { select: { nama: true } },
+            reactions: { select: { emoji: true, nik: true } },
+          },
+        },
+      },
+    });
+    if (!item) throw new NotFoundException('Gallery item not found');
+
+    return {
+      id: item.id,
+      projectId,
+      viewId: item.viewId,
+      title: item.title,
+      description: item.description,
+      createdBy: item.createdBy,
+      createdByName: item.creator?.nama || item.createdBy,
+      createdAt: item.createdAt,
+      updatedAt: item.updatedAt,
+      commentCount: item.comments.length,
+      files: item.files.map((f) => this.mapGalleryFile(f, projectId)),
+      comments: item.comments.map((c) => this.mapGalleryComment(c, nik)),
+    };
+  }
+
+  async createProjectGalleryItem(
+    projectId: string,
+    files: Express.Multer.File[],
+    nik: string,
+    opts: { title: string; description?: string; viewId?: string; notes?: string[] },
+  ): Promise<ProjectGalleryItem> {
+    const pid = (await this.resolveProjectId(projectId)) || this.normalizeGuid(projectId);
+    if (!pid) throw new BadRequestException('Invalid projectId');
+    await this.ensureProjectExists(pid);
+    if (!files?.length) throw new BadRequestException('No files uploaded');
+    if (!nik?.trim()) throw new BadRequestException('User required');
+
+    const title = (opts.title || '').trim().slice(0, 200);
+    if (!title) throw new BadRequestException('Title is required');
+
+    let resolvedViewId: string | null = null;
+    if (opts.viewId?.trim()) {
+      resolvedViewId =
+        (await this.resolveViewId(opts.viewId, pid)) || this.normalizeGuid(opts.viewId) || null;
+    }
+
+    const uploaded = await Promise.all(
+      files.map(async (file, index) => {
+        const originalName = (file.originalname || 'file').slice(0, 255);
+        const safeKeyName = originalName.replace(/[^\w.\-()+ ]+/g, '_').slice(0, 80);
+        const key = `gallery/${pid}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${safeKeyName}`;
+        const result = await this.storageService.uploadFile(
+          key,
+          file.buffer,
+          file.mimetype || 'application/octet-stream',
+        );
+        const noteRaw = opts.notes?.[index]?.trim() || '';
+        return {
+          url: result.url,
+          dropboxPath: result.path,
+          filename: originalName,
+          mimeType: (file.mimetype || 'application/octet-stream').slice(0, 120),
+          bytes: file.size,
+          sortOrder: index,
+          note: noteRaw ? noteRaw.slice(0, 500) : null,
+        };
+      }),
+    );
+
+    const item = await this.prismaService.dT_PROJECT_GALLERY_ITEM.create({
+      data: {
+        projectId: pid,
+        viewId: resolvedViewId,
+        title,
+        description: opts.description?.trim()?.slice(0, 1000) || null,
+        createdBy: nik.trim(),
+        files: {
+          create: uploaded.map((u) => ({
+            projectId: pid,
+            viewId: resolvedViewId,
+            url: u.url,
+            dropboxPath: u.dropboxPath,
+            filename: u.filename,
+            mimeType: u.mimeType,
+            bytes: u.bytes,
+            sortOrder: u.sortOrder,
+            note: u.note,
+            createdBy: nik.trim(),
+          })),
+        },
+      },
+      include: {
+        creator: { select: { nama: true } },
+        files: {
+          orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
+          include: { uploader: { select: { nama: true } } },
+        },
+        _count: { select: { comments: true } },
+      },
+    });
+
+    await this.logActivity({
+      projectId: pid,
+      nik: nik.trim(),
+      action: 'GALLERY_UPLOADED',
+      details: {
+        itemId: item.id,
+        title,
+        count: files.length,
+        filenames: files.map((f) => (f.originalname || 'file').slice(0, 80)),
+      },
+    });
+
+    return {
+      id: item.id,
+      projectId,
+      viewId: item.viewId,
+      title: item.title,
+      description: item.description,
+      createdBy: item.createdBy,
+      createdByName: item.creator?.nama || item.createdBy,
+      createdAt: item.createdAt,
+      updatedAt: item.updatedAt,
+      commentCount: item._count.comments,
+      files: item.files.map((f) => this.mapGalleryFile(f, projectId)),
+    };
+  }
+
+  async updateProjectGalleryItem(
+    projectId: string,
+    itemId: string,
+    data: { title?: string; description?: string | null },
+    nik?: string,
+  ): Promise<ProjectGalleryItem> {
+    const pid = (await this.resolveProjectId(projectId)) || this.normalizeGuid(projectId);
+    const iid = this.normalizeGuid(itemId);
+    if (!pid || !iid) throw new BadRequestException('Invalid id');
+
+    const existing = await this.prismaService.dT_PROJECT_GALLERY_ITEM.findFirst({
+      where: { id: iid, projectId: pid },
+    });
+    if (!existing) throw new NotFoundException('Gallery item not found');
+
+    const updated = await this.prismaService.dT_PROJECT_GALLERY_ITEM.update({
+      where: { id: iid },
+      data: {
+        ...(data.title !== undefined ? { title: data.title.trim().slice(0, 200) } : {}),
+        ...(data.description !== undefined
+          ? { description: data.description?.trim()?.slice(0, 1000) || null }
+          : {}),
+      },
+      include: {
+        creator: { select: { nama: true } },
+        files: {
+          orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
+          include: { uploader: { select: { nama: true } } },
+        },
+        _count: { select: { comments: true } },
+      },
+    });
+
+    if (nik?.trim()) {
+      await this.logActivity({
+        projectId: pid,
+        nik: nik.trim(),
+        action: 'GALLERY_ITEM_UPDATED',
+        details: { itemId: iid, title: updated.title },
+      });
+    }
+
+    return {
+      id: updated.id,
+      projectId,
+      viewId: updated.viewId,
+      title: updated.title,
+      description: updated.description,
+      createdBy: updated.createdBy,
+      createdByName: updated.creator?.nama || updated.createdBy,
+      createdAt: updated.createdAt,
+      updatedAt: updated.updatedAt,
+      commentCount: updated._count.comments,
+      files: updated.files.map((f) => this.mapGalleryFile(f, projectId)),
+    };
+  }
+
+  async updateProjectGalleryFileNote(
+    projectId: string,
+    fileId: string,
+    note: string | null,
+    nik?: string,
+  ): Promise<ProjectGalleryFile> {
+    const pid = (await this.resolveProjectId(projectId)) || this.normalizeGuid(projectId);
+    const fid = this.normalizeGuid(fileId);
+    if (!pid || !fid) throw new BadRequestException('Invalid id');
+
+    const existing = await this.prismaService.dT_PROJECT_GALLERY_FILE.findFirst({
+      where: { id: fid, projectId: pid },
+    });
+    if (!existing) throw new NotFoundException('Gallery file not found');
+
+    const cleaned = note?.trim() ? note.trim().slice(0, 500) : null;
+    const updated = await this.prismaService.dT_PROJECT_GALLERY_FILE.update({
+      where: { id: fid },
+      data: { note: cleaned },
+      include: { uploader: { select: { nama: true } } },
+    });
+
+    if (nik?.trim()) {
+      await this.logActivity({
+        projectId: pid,
+        nik: nik.trim(),
+        action: 'GALLERY_NOTE_UPDATED',
+        details: { fileId: fid, filename: updated.filename, note: cleaned },
+      });
+    }
+
+    return this.mapGalleryFile(updated, projectId);
+  }
+
+  async deleteProjectGalleryItems(
+    projectId: string,
+    itemIds: string[],
+    nik?: string,
+  ): Promise<string> {
+    const pid = (await this.resolveProjectId(projectId)) || this.normalizeGuid(projectId);
+    if (!pid) throw new BadRequestException('Invalid projectId');
+    if (!itemIds?.length) return 'Deleted 0 gallery item(s)';
+
+    const items = await this.prismaService.dT_PROJECT_GALLERY_ITEM.findMany({
+      where: { projectId: pid, id: { in: itemIds } },
+      include: { files: true },
+    });
+
+    await Promise.all(
+      items.flatMap((item) =>
+        item.files.map(async (row) => {
+          try {
+            await this.storageService.deleteFile(row.dropboxPath || row.url);
+          } catch {
+            /* ignore */
+          }
+        }),
+      ),
+    );
+
+    const result = await this.prismaService.dT_PROJECT_GALLERY_ITEM.deleteMany({
+      where: { projectId: pid, id: { in: itemIds } },
+    });
+
+    if (nik?.trim() && result.count > 0) {
+      await this.logActivity({
+        projectId: pid,
+        nik: nik.trim(),
+        action: 'GALLERY_DELETED',
+        details: { count: result.count, titles: items.map((i) => i.title) },
+      });
+    }
+
+    return `Deleted ${result.count} gallery item(s)`;
+  }
+
+  async listGalleryComments(
+    projectId: string,
+    itemId: string,
+    nik?: string,
+  ): Promise<ProjectGalleryComment[]> {
+    const detail = await this.getProjectGalleryItem(projectId, itemId, nik);
+    return detail.comments;
+  }
+
+  async createGalleryComment(
+    projectId: string,
+    itemId: string,
+    body: string,
+    nik: string,
+  ): Promise<ProjectGalleryComment> {
+    const pid = (await this.resolveProjectId(projectId)) || this.normalizeGuid(projectId);
+    const iid = this.normalizeGuid(itemId);
+    if (!pid || !iid) throw new BadRequestException('Invalid id');
+    const text = (body || '').trim();
+    if (!text) throw new BadRequestException('Comment body required');
+    if (!nik?.trim()) throw new BadRequestException('User required');
+
+    const item = await this.prismaService.dT_PROJECT_GALLERY_ITEM.findFirst({
+      where: { id: iid, projectId: pid },
+      select: { id: true },
+    });
+    if (!item) throw new NotFoundException('Gallery item not found');
+
+    const created = await this.prismaService.dT_PROJECT_GALLERY_COMMENT.create({
+      data: { itemId: iid, authorNik: nik.trim(), body: text.slice(0, 2000) },
+      include: {
+        author: { select: { nama: true } },
+        reactions: { select: { emoji: true, nik: true } },
+      },
+    });
+    return this.mapGalleryComment(created, nik);
+  }
+
+  async toggleGalleryCommentReaction(
+    projectId: string,
+    itemId: string,
+    commentId: string,
+    emoji: string,
+    nik: string,
+  ): Promise<ProjectGalleryComment> {
+    const pid = (await this.resolveProjectId(projectId)) || this.normalizeGuid(projectId);
+    const iid = this.normalizeGuid(itemId);
+    const cid = this.normalizeGuid(commentId);
+    if (!pid || !iid || !cid) throw new BadRequestException('Invalid id');
+    const emot = (emoji || '').trim().slice(0, 16);
+    if (!emot) throw new BadRequestException('Emoji required');
+    if (!nik?.trim()) throw new BadRequestException('User required');
+
+    const comment = await this.prismaService.dT_PROJECT_GALLERY_COMMENT.findFirst({
+      where: { id: cid, itemId: iid, item: { projectId: pid } },
+    });
+    if (!comment) throw new NotFoundException('Comment not found');
+
+    const existing = await this.prismaService.dT_PROJECT_GALLERY_COMMENT_REACTION.findUnique({
+      where: { commentId_nik: { commentId: cid, nik: nik.trim() } },
+    });
+
+    if (existing) {
+      if (existing.emoji === emot) {
+        await this.prismaService.dT_PROJECT_GALLERY_COMMENT_REACTION.delete({
+          where: { id: existing.id },
+        });
+      } else {
+        await this.prismaService.dT_PROJECT_GALLERY_COMMENT_REACTION.update({
+          where: { id: existing.id },
+          data: { emoji: emot },
+        });
+      }
+    } else {
+      await this.prismaService.dT_PROJECT_GALLERY_COMMENT_REACTION.create({
+        data: { commentId: cid, nik: nik.trim(), emoji: emot },
+      });
+    }
+
+    const refreshed = await this.prismaService.dT_PROJECT_GALLERY_COMMENT.findUnique({
+      where: { id: cid },
+      include: {
+        author: { select: { nama: true } },
+        reactions: { select: { emoji: true, nik: true } },
+      },
+    });
+    if (!refreshed) throw new NotFoundException('Comment not found');
+    return this.mapGalleryComment(refreshed, nik);
   }
 }

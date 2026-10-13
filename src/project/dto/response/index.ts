@@ -74,6 +74,55 @@ export type AttachmentTask = {
   mimeType: string;
 };
 
+export type ProjectGalleryFile = {
+  id: string;
+  itemId: string;
+  projectId: string;
+  viewId: string | null;
+  url: string;
+  dropboxPath: string;
+  filename: string;
+  mimeType: string;
+  bytes: number;
+  sortOrder: number;
+  createdBy: string;
+  createdByName: string;
+  createdAt: Date | string;
+  note: string | null;
+};
+
+export type ProjectGalleryCommentReaction = {
+  emoji: string;
+  count: number;
+  reacted: boolean;
+};
+
+export type ProjectGalleryComment = {
+  id: string;
+  authorNik: string;
+  authorName: string;
+  body: string;
+  createdAt: string;
+  liked: boolean;
+  likeCount: number;
+  myEmoji?: string | null;
+  reactions: ProjectGalleryCommentReaction[];
+};
+
+export type ProjectGalleryItem = {
+  id: string;
+  projectId: string;
+  viewId: string | null;
+  title: string;
+  description: string | null;
+  createdBy: string;
+  createdByName: string;
+  createdAt: Date | string;
+  updatedAt: Date | string;
+  commentCount: number;
+  files: ProjectGalleryFile[];
+};
+
 export type TaskNonSection = {
   id: string;
   /** UUID asli (untuk match chat TaskRef.guid) */

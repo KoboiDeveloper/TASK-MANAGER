@@ -42,6 +42,12 @@ model DT_USER {
   chatMemberships    DT_CHAT_MEMBER[]
   chatRoomsCreated   DT_CHAT_ROOM[]           @relation("ChatRoomsCreated")
   pushSubscriptions  DT_PUSH_SUBSCRIPTION[]
+  taskComments       DT_TASK_COMMENT[]        @relation("TaskCommentAuthor")
+  taskCommentReactions DT_TASK_COMMENT_REACTION[] @relation("TaskCommentReactor")
+  galleryItemsCreated DT_PROJECT_GALLERY_ITEM[] @relation("GalleryItemCreator")
+  galleryFilesUploaded DT_PROJECT_GALLERY_FILE[] @relation("GalleryFileUploader")
+  galleryComments DT_PROJECT_GALLERY_COMMENT[] @relation("GalleryCommentAuthor")
+  galleryCommentReactions DT_PROJECT_GALLERY_COMMENT_REACTION[] @relation("GalleryCommentReactor")
 
 }
 
@@ -133,6 +139,86 @@ model DT_PROJECT {
   tags        DT_TAG[]                 @relation("ProjectTags")
   activities  LOG_ACTIVITY[]
   invitations LOG_INVITATION_PROJECT[]
+  galleryItems DT_PROJECT_GALLERY_ITEM[]
+  galleryFiles DT_PROJECT_GALLERY_FILE[]
+}
+
+/// ================================
+///  PROJECT GALLERY (groups + files → Dropbox + comments)
+/// ================================
+model DT_PROJECT_GALLERY_ITEM {
+  id          String   @id @default(uuid()) @db.UniqueIdentifier
+  projectId   String   @db.UniqueIdentifier
+  viewId      String?  @db.UniqueIdentifier
+  title       String   @db.NVarChar(200)
+  description String?  @db.NVarChar(1000)
+  createdBy   String   @db.Char(8)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  project  DT_PROJECT @relation(fields: [projectId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  creator  DT_USER    @relation("GalleryItemCreator", fields: [createdBy], references: [nik], onDelete: NoAction, onUpdate: NoAction)
+  files    DT_PROJECT_GALLERY_FILE[]
+  comments DT_PROJECT_GALLERY_COMMENT[]
+
+  @@index([projectId, createdAt])
+  @@index([createdBy])
+}
+
+model DT_PROJECT_GALLERY_FILE {
+  id          String   @id @default(uuid()) @db.UniqueIdentifier
+  itemId      String   @db.UniqueIdentifier
+  projectId   String   @db.UniqueIdentifier
+  viewId      String?  @db.UniqueIdentifier
+  url         String   @db.NVarChar(500)
+  dropboxPath String   @db.NVarChar(500)
+  filename    String   @db.NVarChar(255)
+  mimeType    String   @db.NVarChar(120)
+  bytes       Int
+  sortOrder   Int      @default(0)
+  createdBy   String   @db.Char(8)
+  createdAt   DateTime @default(now())
+  note        String?  @db.NVarChar(500)
+
+  item     DT_PROJECT_GALLERY_ITEM @relation(fields: [itemId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  project  DT_PROJECT              @relation(fields: [projectId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  uploader DT_USER                 @relation("GalleryFileUploader", fields: [createdBy], references: [nik], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([itemId, sortOrder])
+  @@index([projectId, createdAt])
+  @@index([createdBy])
+}
+
+model DT_PROJECT_GALLERY_COMMENT {
+  id        String   @id @default(uuid()) @db.UniqueIdentifier
+  itemId    String   @db.UniqueIdentifier
+  authorNik String   @db.Char(8)
+  body      String   @db.NVarChar(2000)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  item      DT_PROJECT_GALLERY_ITEM            @relation(fields: [itemId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  author    DT_USER                            @relation("GalleryCommentAuthor", fields: [authorNik], references: [nik], onDelete: NoAction, onUpdate: NoAction)
+  reactions DT_PROJECT_GALLERY_COMMENT_REACTION[]
+
+  @@index([itemId, createdAt])
+  @@index([authorNik])
+}
+
+model DT_PROJECT_GALLERY_COMMENT_REACTION {
+  id        String   @id @default(uuid()) @db.UniqueIdentifier
+  commentId String   @db.UniqueIdentifier
+  nik       String   @db.Char(8)
+  emoji     String   @db.NVarChar(16)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  comment DT_PROJECT_GALLERY_COMMENT @relation(fields: [commentId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  user    DT_USER                    @relation("GalleryCommentReactor", fields: [nik], references: [nik], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([commentId, nik])
+  @@index([commentId, emoji])
+  @@index([nik])
 }
 
 /// ================================
@@ -208,6 +294,7 @@ model DT_TASK {
   tags        DT_TAG[]
   logs        LOG_ACTIVITY[]
   chatPinned  DT_CHAT_PINNED_TASK[]
+  comments    DT_TASK_COMMENT[]
 
   @@index([id_dt_project])
   @@index([id_dt_section])
@@ -534,4 +621,40 @@ model DT_ZIMBRA_GOOGLE_EVENT_SYNC {
   @@unique([nik, zimbraEmail, zimbraEventKey])
   @@index([nik, googleEmail])
   @@index([nik, startMs, endMs])
+}
+
+/// ================================
+///  TASK COMMENTS
+/// ================================
+model DT_TASK_COMMENT {
+  id        String   @id @default(uuid()) @db.UniqueIdentifier
+  taskId    String   @db.UniqueIdentifier
+  authorNik String   @db.Char(8)
+  body      String   @db.NVarChar(2000)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  task      DT_TASK                   @relation(fields: [taskId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  author    DT_USER                   @relation("TaskCommentAuthor", fields: [authorNik], references: [nik], onDelete: NoAction, onUpdate: NoAction)
+  reactions DT_TASK_COMMENT_REACTION[]
+
+  @@index([taskId, createdAt])
+  @@index([authorNik])
+}
+
+/// Satu user = satu emot per comment (ganti emot = update row)
+model DT_TASK_COMMENT_REACTION {
+  id        String   @id @default(uuid()) @db.UniqueIdentifier
+  commentId String   @db.UniqueIdentifier
+  nik       String   @db.Char(8)
+  emoji     String   @db.NVarChar(16)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  comment DT_TASK_COMMENT @relation(fields: [commentId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  user    DT_USER         @relation("TaskCommentReactor", fields: [nik], references: [nik], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([commentId, nik])
+  @@index([commentId, emoji])
+  @@index([nik])
 }

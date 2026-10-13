@@ -15,12 +15,14 @@ import {
   Query,
   UseInterceptors,
   UploadedFiles,
+  UploadedFile,
 } from '@nestjs/common';
 import { Request } from 'express';
 import { ProjectService } from './project.service';
 import {
   AddSubTaskRequest,
   CreateProjectRequest,
+  CreateTaskCommentRequest,
   CreateTaskProjectRequest,
   CreateViewRequest,
   MemberRequest,
@@ -28,6 +30,7 @@ import {
   RemoveSectionParamsDto,
   RemoveSectionQueryDto,
   SyncSubTaskAssigneeRequest,
+  ToggleTaskCommentReactionRequest,
   UpdateProjectRequest,
   UpdateSubTaskRequest,
   MoveSubTaskRequest,
@@ -43,7 +46,7 @@ import { EProjectRole } from '../constant/EProjectRole';
 import { CommonResponse } from '../common/commonResponse';
 import { handleException } from '../utils/handleException';
 import { AllowArchivedProject } from '../security/AllowArchivedProject.decorator';
-import { FilesInterceptor } from '@nestjs/platform-express';
+import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
 import { DT_USER } from '@prisma/client';
 import { ownTaskResponse } from './dto/response';
 
@@ -237,6 +240,43 @@ export class ProjectController {
     }
   }
 
+  // ====== TASK COVER (header background) ======
+  @Post('tasks/:taskId/cover')
+  @UseGuards(ProjectMemberGuard)
+  @ProjectRoles(EProjectRole.OWNER, EProjectRole.EDITOR)
+  @UseInterceptors(
+    FileInterceptor('cover', {
+      limits: { fileSize: 5 * 1024 * 1024 },
+    }),
+  )
+  async uploadTaskCover(
+    @Param('taskId') taskId: string,
+    @UploadedFile() cover: Express.Multer.File,
+    @Req() req: Request & { user?: AuthUser },
+  ) {
+    try {
+      const data = await this.projectService.setTaskCover(taskId, cover, req.user?.nik);
+      return new CommonResponse('Task cover uploaded successfully', HttpStatus.OK, data);
+    } catch ({ message }) {
+      return handleException(message as string);
+    }
+  }
+
+  @Delete('tasks/:taskId/cover')
+  @UseGuards(ProjectMemberGuard)
+  @ProjectRoles(EProjectRole.OWNER, EProjectRole.EDITOR)
+  async deleteTaskCover(
+    @Param('taskId') taskId: string,
+    @Req() req: Request & { user?: AuthUser },
+  ) {
+    try {
+      const data = await this.projectService.clearTaskCover(taskId, req.user?.nik);
+      return new CommonResponse('Task cover removed successfully', HttpStatus.OK, data);
+    } catch ({ message }) {
+      return handleException(message as string);
+    }
+  }
+
   // ====== UPLOAD / TAMBAH ATTACHMENT KE TASK ======
   @Post('tasks/:taskId/attachments')
   @ProjectRoles(EProjectRole.OWNER, EProjectRole.EDITOR)
@@ -286,6 +326,56 @@ export class ProjectController {
         taskId,
         deletedIds: body.id,
       });
+    } catch ({ message }) {
+      return handleException(message as string);
+    }
+  }
+
+  // ====== TASK COMMENTS ======
+  @Get('tasks/:taskId/comments')
+  async listTaskComments(
+    @Param('taskId') taskId: string,
+    @Req() req: Request & { user?: AuthUser },
+  ) {
+    try {
+      const data = await this.projectService.listTaskComments(taskId, req.user?.nik || '');
+      return new CommonResponse('Get task comments successfully', HttpStatus.OK, data);
+    } catch ({ message }) {
+      return handleException(message as string);
+    }
+  }
+
+  @Post('tasks/:taskId/comments')
+  async createTaskComment(
+    @Param('taskId') taskId: string,
+    @Body() body: CreateTaskCommentRequest,
+    @Req() req: Request & { user?: AuthUser },
+  ) {
+    try {
+      const data = await this.projectService.createTaskComment(
+        taskId,
+        req.user?.nik || '',
+        body,
+      );
+      return new CommonResponse('Comment created successfully', HttpStatus.OK, data);
+    } catch ({ message }) {
+      return handleException(message as string);
+    }
+  }
+
+  @Post('comments/:commentId/reactions')
+  async toggleTaskCommentReaction(
+    @Param('commentId') commentId: string,
+    @Body() body: ToggleTaskCommentReactionRequest,
+    @Req() req: Request & { user?: AuthUser },
+  ) {
+    try {
+      const data = await this.projectService.toggleTaskCommentReaction(
+        commentId,
+        req.user?.nik || '',
+        body,
+      );
+      return new CommonResponse('Reaction updated successfully', HttpStatus.OK, data);
     } catch ({ message }) {
       return handleException(message as string);
     }
@@ -563,6 +653,220 @@ export class ProjectController {
         dto.settings,
       );
       return new CommonResponse('View created successfully', HttpStatus.CREATED, view);
+    } catch ({ message }) {
+      return handleException(message as string);
+    }
+  }
+
+  // ====== PROJECT GALLERY (items + multi-files + comments → Dropbox) ======
+  @Get(':projectId/gallery')
+  @UseGuards(ProjectMemberGuard)
+  async listProjectGallery(@Param('projectId') projectId: string) {
+    try {
+      const items = await this.projectService.listProjectGalleryItems(projectId);
+      return new CommonResponse('Get project gallery success', HttpStatus.OK, items);
+    } catch ({ message }) {
+      return handleException(message as string);
+    }
+  }
+
+  @Get(':projectId/gallery/items/:itemId')
+  @UseGuards(ProjectMemberGuard)
+  async getProjectGalleryItem(
+    @Param('projectId') projectId: string,
+    @Param('itemId') itemId: string,
+    @Req() req: Request & { user?: AuthUser },
+  ) {
+    try {
+      const item = await this.projectService.getProjectGalleryItem(
+        projectId,
+        itemId,
+        req.user?.nik,
+      );
+      return new CommonResponse('Get gallery item success', HttpStatus.OK, item);
+    } catch ({ message }) {
+      return handleException(message as string);
+    }
+  }
+
+  @Post(':projectId/gallery')
+  @UseGuards(ProjectMemberGuard)
+  @ProjectRoles(EProjectRole.OWNER, EProjectRole.EDITOR)
+  @UseInterceptors(
+    FilesInterceptor('files', 20, {
+      limits: { fileSize: 100 * 1024 * 1024 },
+    }),
+  )
+  async uploadProjectGallery(
+    @Param('projectId') projectId: string,
+    @UploadedFiles() files: Express.Multer.File[],
+    @Query('viewId') viewId: string | undefined,
+    @Body()
+    body: {
+      title?: string;
+      description?: string;
+      notes?: string | string[];
+      note?: string;
+    },
+    @Req() req: Request & { user?: AuthUser },
+  ) {
+    try {
+      let notes: string[] | undefined;
+      const rawNotes = body?.notes ?? body?.note;
+      if (Array.isArray(rawNotes)) {
+        notes = rawNotes.map((n) => String(n ?? ''));
+      } else if (typeof rawNotes === 'string' && rawNotes.trim()) {
+        try {
+          const parsed = JSON.parse(rawNotes);
+          notes = Array.isArray(parsed)
+            ? parsed.map((n) => String(n ?? ''))
+            : files?.map(() => rawNotes);
+        } catch {
+          notes = files?.map(() => rawNotes);
+        }
+      }
+
+      const data = await this.projectService.createProjectGalleryItem(
+        projectId,
+        files,
+        req.user?.nik || '',
+        {
+          title: body?.title || files?.[0]?.originalname || 'Untitled',
+          description: body?.description,
+          viewId,
+          notes,
+        },
+      );
+      return new CommonResponse('Gallery item created successfully', HttpStatus.OK, data);
+    } catch ({ message }) {
+      return handleException(message as string);
+    }
+  }
+
+  @Patch(':projectId/gallery/items/:itemId')
+  @UseGuards(ProjectMemberGuard)
+  @ProjectRoles(EProjectRole.OWNER, EProjectRole.EDITOR)
+  async updateProjectGalleryItem(
+    @Param('projectId') projectId: string,
+    @Param('itemId') itemId: string,
+    @Body() body: { title?: string; description?: string | null },
+    @Req() req: Request & { user?: AuthUser },
+  ) {
+    try {
+      const data = await this.projectService.updateProjectGalleryItem(
+        projectId,
+        itemId,
+        body || {},
+        req.user?.nik,
+      );
+      return new CommonResponse('Gallery item updated', HttpStatus.OK, data);
+    } catch ({ message }) {
+      return handleException(message as string);
+    }
+  }
+
+  @Patch(':projectId/gallery/files/:fileId')
+  @UseGuards(ProjectMemberGuard)
+  @ProjectRoles(EProjectRole.OWNER, EProjectRole.EDITOR)
+  async updateProjectGalleryNote(
+    @Param('projectId') projectId: string,
+    @Param('fileId') fileId: string,
+    @Body() body: { note?: string | null },
+    @Req() req: Request & { user?: AuthUser },
+  ) {
+    try {
+      const data = await this.projectService.updateProjectGalleryFileNote(
+        projectId,
+        fileId,
+        body?.note ?? null,
+        req.user?.nik,
+      );
+      return new CommonResponse('Gallery file note updated', HttpStatus.OK, data);
+    } catch ({ message }) {
+      return handleException(message as string);
+    }
+  }
+
+  @Delete(':projectId/gallery')
+  @UseGuards(ProjectMemberGuard)
+  @ProjectRoles(EProjectRole.OWNER, EProjectRole.EDITOR)
+  async deleteProjectGallery(
+    @Param('projectId') projectId: string,
+    @Body() body: { ids?: string[] },
+    @Req() req: Request & { user?: AuthUser },
+  ) {
+    try {
+      const message = await this.projectService.deleteProjectGalleryItems(
+        projectId,
+        body?.ids || [],
+        req.user?.nik,
+      );
+      return new CommonResponse(message, HttpStatus.OK, { projectId, deletedIds: body?.ids || [] });
+    } catch ({ message }) {
+      return handleException(message as string);
+    }
+  }
+
+  @Get(':projectId/gallery/items/:itemId/comments')
+  @UseGuards(ProjectMemberGuard)
+  async listGalleryComments(
+    @Param('projectId') projectId: string,
+    @Param('itemId') itemId: string,
+    @Req() req: Request & { user?: AuthUser },
+  ) {
+    try {
+      const comments = await this.projectService.listGalleryComments(
+        projectId,
+        itemId,
+        req.user?.nik,
+      );
+      return new CommonResponse('Get gallery comments success', HttpStatus.OK, comments);
+    } catch ({ message }) {
+      return handleException(message as string);
+    }
+  }
+
+  @Post(':projectId/gallery/items/:itemId/comments')
+  @UseGuards(ProjectMemberGuard)
+  @ProjectRoles(EProjectRole.OWNER, EProjectRole.EDITOR)
+  async createGalleryComment(
+    @Param('projectId') projectId: string,
+    @Param('itemId') itemId: string,
+    @Body() body: { body?: string },
+    @Req() req: Request & { user?: AuthUser },
+  ) {
+    try {
+      const comment = await this.projectService.createGalleryComment(
+        projectId,
+        itemId,
+        body?.body || '',
+        req.user?.nik || '',
+      );
+      return new CommonResponse('Gallery comment created', HttpStatus.OK, comment);
+    } catch ({ message }) {
+      return handleException(message as string);
+    }
+  }
+
+  @Post(':projectId/gallery/items/:itemId/comments/:commentId/reactions')
+  @UseGuards(ProjectMemberGuard)
+  @ProjectRoles(EProjectRole.OWNER, EProjectRole.EDITOR)
+  async toggleGalleryCommentReaction(
+    @Param('projectId') projectId: string,
+    @Param('itemId') itemId: string,
+    @Param('commentId') commentId: string,
+    @Body() body: { emoji?: string },
+    @Req() req: Request & { user?: AuthUser },
+  ) {
+    try {
+      const comment = await this.projectService.toggleGalleryCommentReaction(
+        projectId,
+        itemId,
+        commentId,
+        body?.emoji || '👍',
+        req.user?.nik || '',
+      );
+      return new CommonResponse('Gallery reaction updated', HttpStatus.OK, comment);
     } catch ({ message }) {
       return handleException(message as string);
     }

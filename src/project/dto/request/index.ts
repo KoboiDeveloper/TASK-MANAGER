@@ -393,3 +393,18 @@ export class DemoteTaskRequest {
   @IsOptional()
   afterId?: string | null;
 }
+
+export class CreateTaskCommentRequest {
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(2000)
+  body!: string;
+}
+
+/** Satu user = satu emot per comment; emoji sama = hapus, beda = update */
+export class ToggleTaskCommentReactionRequest {
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(16)
+  emoji!: string;
+}
