@@ -6,15 +6,30 @@ import {
 } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  GoogleOAuthClient,
+  hasGmailScope,
+} from '../google-calendar/google-oauth.client';
 import { MailboxCryptoService } from './mailbox-crypto.service';
 import { ZimbraSoapClient } from './zimbra-soap.client';
+import { GmailApiClient } from './gmail-api.client';
 import { DropboxStorageService } from '../storage/dropbox.storage.service';
 import { ConnectMailboxDto, MessageActionDto, SendMessageDto } from './dto/mailbox.dto';
 import { DROPBOX_GLYPH_CID, DROPBOX_GLYPH_PNG } from './dropbox-glyph';
 import {
   normalizeMailboxEmail,
   pickActiveAfterDisconnect,
+  type MailboxProvider,
 } from './mailbox-active.util';
+
+/** DT_USER.activeZimbraEmail stores the active mailbox email for ANY provider (zimbra|gmail). */
+type MergedMailboxAccount = {
+  email: string;
+  name: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+  provider: MailboxProvider;
+};
 
 export type FolderNode = {
   id: string;
@@ -69,10 +84,98 @@ export class MailboxService {
     private readonly prisma: PrismaService,
     private readonly crypto: MailboxCryptoService,
     private readonly zimbra: ZimbraSoapClient,
+    private readonly gmail: GmailApiClient,
+    private readonly oauth: GoogleOAuthClient,
     private readonly dropbox: DropboxStorageService,
   ) {}
 
   async getStatus(nik: string) {
+    const merged = await this.listMergedAccounts(nik);
+    const user = await this.prisma.dT_USER.findUnique({
+      where: { nik },
+      // activeZimbraEmail = active mailbox email (zimbra or gmail)
+      select: { activeZimbraEmail: true },
+    });
+    const accounts = merged.map((r) => ({
+      email: r.email,
+      name: r.name,
+      provider: r.provider,
+      createdAt: r.createdAt.toISOString(),
+      updatedAt: r.updatedAt.toISOString(),
+    }));
+    let activeEmail = user?.activeZimbraEmail ?? null;
+    if (activeEmail && !accounts.some((a) => a.email === activeEmail)) {
+      activeEmail = pickActiveAfterDisconnect(
+        merged.map((r) => ({
+          email: r.email,
+          createdAt: r.createdAt,
+          provider: r.provider,
+        })),
+      );
+      await this.prisma.dT_USER.update({
+        where: { nik },
+        data: { activeZimbraEmail: activeEmail },
+      });
+    }
+    if (!activeEmail && accounts.length) {
+      activeEmail = accounts[0].email; // newest (merged sorted desc)
+      await this.prisma.dT_USER.update({
+        where: { nik },
+        data: { activeZimbraEmail: activeEmail },
+      });
+    }
+    return {
+      connected: accounts.length > 0,
+      activeEmail,
+      email: activeEmail, // compat
+      accounts,
+      updatedAt: accounts[0]?.updatedAt ?? null,
+    };
+  }
+
+  /**
+   * Active mailbox ownership → provider + email.
+   * Throws if no Zimbra/Gmail mailbox is connected.
+   */
+  async resolveMailboxContext(
+    nik: string,
+  ): Promise<{ provider: MailboxProvider; email: string }> {
+    const merged = await this.listMergedAccounts(nik);
+    if (!merged.length) {
+      throw new BadRequestException(
+        'Mailbox belum terhubung. Hubungkan akun Zimbra atau Google (Gmail) dulu.',
+      );
+    }
+    const user = await this.prisma.dT_USER.findUnique({
+      where: { nik },
+      select: { activeZimbraEmail: true },
+    });
+    let activeEmail = user?.activeZimbraEmail ?? null;
+    if (!activeEmail || !merged.some((a) => a.email === activeEmail)) {
+      activeEmail = pickActiveAfterDisconnect(
+        merged.map((r) => ({
+          email: r.email,
+          createdAt: r.createdAt,
+          provider: r.provider,
+        })),
+      );
+      if (activeEmail) {
+        await this.prisma.dT_USER.update({
+          where: { nik },
+          data: { activeZimbraEmail: activeEmail },
+        });
+      }
+    }
+    const acc = merged.find((a) => a.email === activeEmail);
+    if (!acc || !activeEmail) {
+      throw new BadRequestException(
+        'Mailbox belum terhubung. Hubungkan akun Zimbra atau Google (Gmail) dulu.',
+      );
+    }
+    return { provider: acc.provider, email: acc.email };
+  }
+
+  private async listMergedAccounts(nik: string): Promise<MergedMailboxAccount[]> {
     const rows = await this.prisma.dT_MAILBOX_CREDENTIAL.findMany({
       where: { nik },
       orderBy: { createdAt: 'desc' },
@@ -109,40 +212,39 @@ export class MailboxService {
       }
     }
 
-    const user = await this.prisma.dT_USER.findUnique({
-      where: { nik },
-      select: { activeZimbraEmail: true },
-    });
-    const accounts = rows.map((r) => ({
+    const zimbraAccounts: MergedMailboxAccount[] = rows.map((r) => ({
       email: r.zimbraEmail,
       name: (r.displayName || '').trim() || null,
-      createdAt: r.createdAt.toISOString(),
-      updatedAt: r.updatedAt.toISOString(),
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+      provider: 'zimbra' as const,
     }));
-    let activeEmail = user?.activeZimbraEmail ?? null;
-    if (activeEmail && !accounts.some((a) => a.email === activeEmail)) {
-      activeEmail = pickActiveAfterDisconnect(
-        rows.map((r) => ({ zimbraEmail: r.zimbraEmail, createdAt: r.createdAt })),
-      );
-      await this.prisma.dT_USER.update({
-        where: { nik },
-        data: { activeZimbraEmail: activeEmail },
-      });
-    }
-    if (!activeEmail && accounts.length) {
-      activeEmail = accounts[0].email; // newest (query desc)
-      await this.prisma.dT_USER.update({
-        where: { nik },
-        data: { activeZimbraEmail: activeEmail },
-      });
-    }
-    return {
-      connected: accounts.length > 0,
-      activeEmail,
-      email: activeEmail, // compat
-      accounts,
-      updatedAt: accounts[0]?.updatedAt ?? null,
-    };
+
+    const googleRows = await this.prisma.dT_GOOGLE_CREDENTIAL.findMany({
+      where: { nik },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        googleEmail: true,
+        displayName: true,
+        createdAt: true,
+        updatedAt: true,
+        scope: true,
+      },
+    });
+
+    const gmailAccounts: MergedMailboxAccount[] = googleRows
+      .filter((r) => hasGmailScope(r.scope))
+      .map((r) => ({
+        email: r.googleEmail,
+        name: (r.displayName || '').trim() || null,
+        createdAt: r.createdAt,
+        updatedAt: r.updatedAt,
+        provider: 'gmail' as const,
+      }));
+
+    return [...zimbraAccounts, ...gmailAccounts].sort(
+      (a, b) => b.createdAt.getTime() - a.createdAt.getTime(),
+    );
   }
 
   async connect(nik: string, dto: ConnectMailboxDto) {
@@ -185,6 +287,17 @@ export class MailboxService {
 
   async disconnect(nik: string, email: string) {
     const normalized = normalizeMailboxEmail(email);
+    const merged = await this.listMergedAccounts(nik);
+    const target = merged.find((a) => a.email === normalized);
+    if (!target) {
+      throw new BadRequestException('Akun tidak ditemukan');
+    }
+    if (target.provider === 'gmail') {
+      throw new BadRequestException(
+        'Lepas akun Google dari Pengaturan → Google (Calendar & Gmail)',
+      );
+    }
+
     const deleted = await this.prisma.dT_MAILBOX_CREDENTIAL.deleteMany({
       where: { nik, zimbraEmail: normalized },
     });
@@ -198,11 +311,14 @@ export class MailboxService {
     });
     const active = user?.activeZimbraEmail ?? null;
     if (!active || normalizeMailboxEmail(active) === normalized) {
-      const remaining = await this.prisma.dT_MAILBOX_CREDENTIAL.findMany({
-        where: { nik },
-        select: { zimbraEmail: true, createdAt: true },
-      });
-      const nextActive = pickActiveAfterDisconnect(remaining);
+      const remaining = await this.listMergedAccounts(nik);
+      const nextActive = pickActiveAfterDisconnect(
+        remaining.map((r) => ({
+          email: r.email,
+          createdAt: r.createdAt,
+          provider: r.provider,
+        })),
+      );
       await this.prisma.dT_USER.update({
         where: { nik },
         data: { activeZimbraEmail: nextActive },
@@ -214,10 +330,9 @@ export class MailboxService {
 
   async setActive(nik: string, email: string) {
     const normalized = normalizeMailboxEmail(email);
-    const cred = await this.prisma.dT_MAILBOX_CREDENTIAL.findUnique({
-      where: { nik_zimbraEmail: { nik, zimbraEmail: normalized } },
-    });
-    if (!cred) {
+    const merged = await this.listMergedAccounts(nik);
+    const found = merged.find((a) => a.email === normalized);
+    if (!found) {
       throw new BadRequestException('Akun tidak ditemukan');
     }
     await this.prisma.dT_USER.update({
@@ -228,6 +343,11 @@ export class MailboxService {
   }
 
   async getFolders(nik: string): Promise<FolderNode[]> {
+    const ctx = await this.resolveMailboxContext(nik);
+    if (ctx.provider === 'gmail') {
+      const token = await this.getGoogleAccessToken(nik, ctx.email);
+      return this.gmail.listFolders(token);
+    }
     const body = await this.withAuth(nik, (token) =>
       this.zimbra.call(token, {
         GetFolderRequest: {
@@ -241,6 +361,9 @@ export class MailboxService {
   }
 
   async getCalendars(nik: string): Promise<FolderNode[]> {
+    const ctx = await this.resolveMailboxContext(nik);
+    // Mailbox calendars are Zimbra-only; Google calendars live in GoogleCalendarService
+    if (ctx.provider === 'gmail') return [];
     const body = await this.withAuth(nik, (token) =>
       this.zimbra.call(token, {
         GetFolderRequest: {
@@ -274,6 +397,15 @@ export class MailboxService {
     if (!title) throw new BadRequestException('Judul wajib');
     if (!Number.isFinite(input.start) || !Number.isFinite(input.end) || input.end <= input.start) {
       throw new BadRequestException('Range waktu tidak valid');
+    }
+
+    if (!input.email) {
+      const ctx = await this.resolveMailboxContext(nik);
+      if (ctx.provider === 'gmail') {
+        throw new BadRequestException(
+          'Buat event Google lewat Kalender Google, bukan mailbox Zimbra',
+        );
+      }
     }
 
     const cred = await this.resolveCredential(nik, input.email);
@@ -401,6 +533,11 @@ export class MailboxService {
       throw new BadRequestException('Rentang events maksimal 800 hari');
     }
 
+    if (!opts.email) {
+      const ctx = await this.resolveMailboxContext(nik);
+      if (ctx.provider === 'gmail') return [];
+    }
+
     const chunks: CalendarEvent[] = [];
     let cursor = start;
     while (cursor < end) {
@@ -458,6 +595,21 @@ export class MailboxService {
   ): Promise<{ messages: MessageSummary[]; more: boolean; offset: number }> {
     const limit = Math.min(Math.max(opts.limit ?? 50, 1), 100);
     const offset = Math.max(opts.offset ?? 0, 0);
+    const ctx = await this.resolveMailboxContext(nik);
+    if (ctx.provider === 'gmail') {
+      const token = await this.getGoogleAccessToken(nik, ctx.email);
+      const res = await this.gmail.listMessages(token, {
+        labelIds: opts.folderId ? [opts.folderId] : undefined,
+        q: opts.query?.trim() || undefined,
+        maxResults: limit,
+      });
+      return {
+        messages: res.messages,
+        more: res.more,
+        offset,
+      };
+    }
+
     const parts: string[] = [];
     if (opts.folderId) parts.push(`inid:${opts.folderId}`);
     if (opts.query?.trim()) parts.push(opts.query.trim());
@@ -488,6 +640,11 @@ export class MailboxService {
   }
 
   async getMessage(nik: string, id: string) {
+    const ctx = await this.resolveMailboxContext(nik);
+    if (ctx.provider === 'gmail') {
+      const token = await this.getGoogleAccessToken(nik, ctx.email);
+      return this.gmail.getMessage(token, id);
+    }
     const body = await this.withAuth(nik, (token) =>
       this.zimbra.call(token, {
         GetMsgRequest: {
@@ -506,6 +663,12 @@ export class MailboxService {
   async sendMessage(nik: string, dto: SendMessageDto) {
     if (!this.splitAddrs(dto.to || '').length) {
       throw new BadRequestException('Tambahkan minimal satu penerima');
+    }
+    const ctx = await this.resolveMailboxContext(nik);
+    if (ctx.provider === 'gmail') {
+      this.assertNoZimbraOnlyAttachments(dto);
+      const token = await this.getGoogleAccessToken(nik, ctx.email);
+      return this.gmail.sendMessage(token, dto);
     }
     const body = await this.withAuth(nik, async (token) => {
       const prepared = await this.attachDropboxGlyph(token, dto);
@@ -528,6 +691,12 @@ export class MailboxService {
   }
 
   async saveDraft(nik: string, dto: SendMessageDto) {
+    const ctx = await this.resolveMailboxContext(nik);
+    if (ctx.provider === 'gmail') {
+      this.assertNoZimbraOnlyAttachments(dto);
+      const token = await this.getGoogleAccessToken(nik, ctx.email);
+      return this.gmail.saveDraft(token, dto);
+    }
     const body = await this.withAuth(nik, async (token) => {
       const prepared = await this.attachDropboxGlyph(token, dto);
       const e = this.buildMimeEmail(prepared.dto);
@@ -548,6 +717,16 @@ export class MailboxService {
       (body as { SaveDraftResponse?: { m?: unknown } }).SaveDraftResponse?.m,
     )[0] as { id?: string } | undefined;
     return { ok: true, id: draft?.id || null };
+  }
+
+  private assertNoZimbraOnlyAttachments(dto: SendMessageDto) {
+    const hasAids = (dto.attachmentAids || '').trim().length > 0;
+    const hasParts = (dto.attachmentParts || '').trim().length > 0;
+    if (hasAids || hasParts) {
+      throw new BadRequestException(
+        'Lampiran Gmail membutuhkan unggah byte (bukan attachmentAids/part Zimbra)',
+      );
+    }
   }
 
   /**
@@ -606,6 +785,11 @@ export class MailboxService {
   }
 
   async messageAction(nik: string, id: string, dto: MessageActionDto) {
+    const ctx = await this.resolveMailboxContext(nik);
+    if (ctx.provider === 'gmail') {
+      const token = await this.getGoogleAccessToken(nik, ctx.email);
+      return this.gmail.messageAction(token, id, dto);
+    }
     const OPS: Record<string, string> = {
       read: 'read',
       unread: '!read',
@@ -640,6 +824,11 @@ export class MailboxService {
   }
 
   async getTags(nik: string) {
+    const ctx = await this.resolveMailboxContext(nik);
+    if (ctx.provider === 'gmail') {
+      const token = await this.getGoogleAccessToken(nik, ctx.email);
+      return this.gmail.listTags(token);
+    }
     const body = await this.withAuth(nik, (token) =>
       this.zimbra.call(token, {
         GetTagRequest: { _jsns: 'urn:zimbraMail' },
@@ -659,6 +848,26 @@ export class MailboxService {
    * Dipakai compose: Zimbra dulu; FE boleh fallback custom lokal jika kosong.
    */
   async getSignatures(nik: string) {
+    const ctx = await this.resolveMailboxContext(nik);
+    if (ctx.provider === 'gmail') {
+      const token = await this.getGoogleAccessToken(nik, ctx.email);
+      const res = await this.gmail.listSignatures(token);
+      const defaultSig =
+        res.signatures.find((s) => s.id && s.id === res.defaultId) ||
+        res.signatures.find((s) => s.html.trim()) ||
+        res.signatures[0] ||
+        null;
+      return {
+        defaultId: defaultSig?.id || res.defaultId,
+        defaultHtml: defaultSig?.html || '',
+        signatures: res.signatures.map((s) => ({
+          id: s.id,
+          name: s.name,
+          html: s.html,
+          text: this.stripHtml(s.html),
+        })),
+      };
+    }
     const { signatures, defaultId } = await this.withAuth(nik, async (token) => {
       const [sigBody, prefsBody] = await Promise.all([
         this.zimbra.call(token, {
@@ -710,6 +919,12 @@ export class MailboxService {
     nik: string,
     dto: { id?: string; name?: string; html: string },
   ) {
+    const ctx = await this.resolveMailboxContext(nik);
+    if (ctx.provider === 'gmail') {
+      throw new BadRequestException(
+        'Ubah signature Gmail di pengaturan Gmail / Google Account',
+      );
+    }
     const html = (dto.html || '').trim();
     const name = (dto.name || 'Signature').trim() || 'Signature';
 
@@ -797,6 +1012,9 @@ export class MailboxService {
   async autocomplete(nik: string, q: string) {
     const name = (q || '').trim();
     if (name.length < 1) return [];
+    const ctx = await this.resolveMailboxContext(nik);
+    if (ctx.provider === 'gmail') return [];
+
     const seen = new Set<string>();
     const out: Array<{ email: string; name: string; type: string }> = [];
 
@@ -969,6 +1187,13 @@ export class MailboxService {
 
       this.throwIfUploadAborted(options?.signal);
 
+      const ctx = await this.resolveMailboxContext(nik);
+      if (ctx.provider === 'gmail') {
+        throw new BadRequestException(
+          'Upload lampiran Gmail belum didukung dari endpoint mailbox ini',
+        );
+      }
+
       // Zimbra upload expects Multer file with buffer
       const buffer = await this.readUploadBuffer(file);
       const zimbraFile = { ...file, buffer };
@@ -1025,8 +1250,80 @@ export class MailboxService {
   }
 
   async downloadAttachment(nik: string, messageId: string, part: string) {
+    const ctx = await this.resolveMailboxContext(nik);
+    if (ctx.provider === 'gmail') {
+      const token = await this.getGoogleAccessToken(nik, ctx.email);
+      // Gmail: `part` is the attachmentId from message detail
+      const file = await this.gmail.downloadAttachment(token, messageId, part);
+      return {
+        buffer: file.data,
+        contentType: 'application/octet-stream',
+        filename: undefined as string | undefined,
+      };
+    }
     const path = `/service/home/~/?auth=co&id=${encodeURIComponent(messageId)}&part=${encodeURIComponent(part)}`;
     return this.withAuth(nik, (token) => this.zimbra.downloadContent(token, path));
+  }
+
+  /**
+   * Refresh Google access token for mailbox Gmail ops.
+   * Mirrors GoogleCalendarService.getValidAccessToken — kept here to avoid
+   * circular DI (GoogleCalendarService already imports MailboxService).
+   */
+  private async getGoogleAccessToken(nik: string, email: string): Promise<string> {
+    const row = await this.prisma.dT_GOOGLE_CREDENTIAL.findUnique({
+      where: { nik_googleEmail: { nik, googleEmail: email } },
+    });
+    if (!row || !hasGmailScope(row.scope)) {
+      throw new BadRequestException(
+        'Akun Gmail tidak ditemukan atau scope hilang — hubungkan ulang di Pengaturan',
+      );
+    }
+
+    const stillValid =
+      row.accessTokenExpiresAt &&
+      row.accessTokenExpiresAt.getTime() > Date.now() + 30_000;
+    if (stillValid) {
+      return this.crypto.decrypt({
+        cipher: row.accessTokenCipher,
+        iv: row.accessTokenIv,
+        tag: row.accessTokenTag,
+      });
+    }
+
+    const refreshToken = this.crypto.decrypt({
+      cipher: row.refreshTokenCipher,
+      iv: row.refreshTokenIv,
+      tag: row.refreshTokenTag,
+    });
+    const tokens = await this.oauth.refreshAccessToken(refreshToken);
+    const accessEnc = this.crypto.encrypt(tokens.access_token);
+    const expiresAt = new Date(
+      Date.now() + Math.max((tokens.expires_in || 3600) - 60, 60) * 1000,
+    );
+    const refreshEnc = tokens.refresh_token
+      ? this.crypto.encrypt(tokens.refresh_token)
+      : null;
+
+    await this.prisma.dT_GOOGLE_CREDENTIAL.update({
+      where: { id: row.id },
+      data: {
+        accessTokenCipher: accessEnc.cipher,
+        accessTokenIv: accessEnc.iv,
+        accessTokenTag: accessEnc.tag,
+        accessTokenExpiresAt: expiresAt,
+        ...(refreshEnc
+          ? {
+              refreshTokenCipher: refreshEnc.cipher,
+              refreshTokenIv: refreshEnc.iv,
+              refreshTokenTag: refreshEnc.tag,
+            }
+          : {}),
+        ...(tokens.scope ? { scope: tokens.scope } : {}),
+      },
+    });
+
+    return tokens.access_token;
   }
 
   private async resolveCredential(nik: string, accountEmail?: string) {
