@@ -13,6 +13,9 @@ import { MailboxCryptoService } from '../mailbox/mailbox-crypto.service';
 import { MailboxService, type CalendarEvent as ZimbraCalendarEvent } from '../mailbox/mailbox.service';
 import {
   GoogleOAuthClient,
+  GOOGLE_SCOPES,
+  hasCalendarScope,
+  hasGmailScope,
   type GoogleCalendarEventRaw,
 } from './google-oauth.client';
 
@@ -69,15 +72,23 @@ export class GoogleCalendarService {
         scope: true,
       },
     });
-    const accounts = rows.map((r) => ({
-      email: r.googleEmail,
-      name: (r.displayName || '').trim() || null,
-      createdAt: r.createdAt.toISOString(),
-      updatedAt: r.updatedAt.toISOString(),
-    }));
+    const accounts = rows.map((r) => {
+      const needsReauth =
+        !hasGmailScope(r.scope) || !hasCalendarScope(r.scope);
+      return {
+        email: r.googleEmail,
+        name: (r.displayName || '').trim() || null,
+        createdAt: r.createdAt.toISOString(),
+        updatedAt: r.updatedAt.toISOString(),
+        needsReauth,
+      };
+    });
+    const needsReauth =
+      accounts.length > 0 && accounts.some((a) => a.needsReauth);
     return {
       configured: this.oauth.isConfigured(),
       connected: accounts.length > 0,
+      needsReauth,
       email: accounts[0]?.email ?? null,
       name: accounts[0]?.name ?? null,
       accounts,
@@ -208,7 +219,7 @@ export class GoogleCalendarService {
         refreshTokenIv: refreshEnc.iv,
         refreshTokenTag: refreshEnc.tag,
         accessTokenExpiresAt: expiresAt,
-        scope: tokens.scope || null,
+        scope: tokens.scope ?? GOOGLE_SCOPES,
       },
       update: {
         ...(displayName ? { displayName } : {}),
@@ -219,7 +230,7 @@ export class GoogleCalendarService {
         refreshTokenIv: refreshEnc.iv,
         refreshTokenTag: refreshEnc.tag,
         accessTokenExpiresAt: expiresAt,
-        scope: tokens.scope || null,
+        scope: tokens.scope ?? GOOGLE_SCOPES,
       },
     });
 
