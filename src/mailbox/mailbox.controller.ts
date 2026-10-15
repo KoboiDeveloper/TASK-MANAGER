@@ -103,6 +103,16 @@ export class MailboxController {
     }
   }
 
+  @Get('google/picker-config')
+  async pickerConfig(@Req() req: Request & { user?: AuthUser }) {
+    try {
+      const data = await this.mailbox.getGooglePickerConfig(req.user!.nik);
+      return new CommonResponse('OK', HttpStatus.OK, data);
+    } catch (e) {
+      return handleException(e);
+    }
+  }
+
   @Get('events')
   async events(
     @Req() req: Request & { user?: AuthUser },

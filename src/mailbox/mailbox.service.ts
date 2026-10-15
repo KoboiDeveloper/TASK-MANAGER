@@ -1684,6 +1684,38 @@ export class MailboxService {
   }
 
   /**
+   * Config + short-lived access token for Google Picker (compose attach).
+   * Prefer active Gmail mailbox; else any Google credential with drive.file.
+   */
+  async getGooglePickerConfig(nik: string) {
+    const ctx = await this.resolveMailboxContext(nik);
+    let email = ctx.provider === 'gmail' ? ctx.email : null;
+    if (!email) {
+      const rows = await this.prisma.dT_GOOGLE_CREDENTIAL.findMany({
+        where: { nik },
+        select: { googleEmail: true, scope: true },
+        orderBy: { updatedAt: 'desc' },
+      });
+      email = rows.find((r) => hasDriveScope(r.scope))?.googleEmail ?? null;
+    }
+    if (!email) {
+      throw new BadRequestException(
+        'Hubungkan Google + Drive dulu di Pengaturan',
+      );
+    }
+    const accessToken = await this.getGoogleAccessToken(nik, email);
+    const clientId =
+      process.env.GOOGLE_OAUTH_CLIENT_ID || process.env.GOOGLE_CLIENT_ID;
+    const apiKey = process.env.GOOGLE_PICKER_API_KEY;
+    if (!clientId || !apiKey) {
+      throw new BadRequestException(
+        'Google Picker belum dikonfigurasi di server',
+      );
+    }
+    return { clientId, apiKey, accessToken, googleEmail: email };
+  }
+
+  /**
    * Salin lampiran pesan ke Google Drive milik user (My Drive).
    * Butuh credential Google dengan scope drive.file.
    */
