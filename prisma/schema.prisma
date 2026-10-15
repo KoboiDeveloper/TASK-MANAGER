@@ -37,7 +37,7 @@ model DT_USER {
   receivedInvites    LOG_INVITATION_PROJECT[] @relation("ReceiverInvites")
   refreshTokens      LOG_REFRESH_TOKEN[]
   mailboxCredentials DT_MAILBOX_CREDENTIAL[]
-  googleCalendarCredentials DT_GOOGLE_CALENDAR_CREDENTIAL[]
+  googleCredentials DT_GOOGLE_CREDENTIAL[]
   zimbraGoogleEventSyncs DT_ZIMBRA_GOOGLE_EVENT_SYNC[]
   chatMemberships    DT_CHAT_MEMBER[]
   chatRoomsCreated   DT_CHAT_ROOM[]           @relation("ChatRoomsCreated")
@@ -579,7 +579,7 @@ model DT_MAILBOX_CREDENTIAL {
   @@index([nik])
 }
 
-model DT_GOOGLE_CALENDAR_CREDENTIAL {
+model DT_GOOGLE_CREDENTIAL {
   id                   String    @id @db.VarChar(36)
   nik                  String    @db.Char(8)
   googleEmail          String    @db.NVarChar(255)
@@ -599,6 +599,7 @@ model DT_GOOGLE_CALENDAR_CREDENTIAL {
 
   @@unique([nik, googleEmail])
   @@index([nik])
+  @@map("DT_GOOGLE_CALENDAR_CREDENTIAL")
 }
 
 model DT_ZIMBRA_GOOGLE_EVENT_SYNC {
