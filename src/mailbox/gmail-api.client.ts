@@ -204,11 +204,19 @@ export class GmailApiClient {
     };
   }
 
+  /**
+   * Send via Gmail. Pass resolved attachment bytes as `attachments`
+   * (`GmailAttachmentInput[]`). `dto.attachmentAids` / `attachmentParts` are
+   * ignored here by design — Task 5 router must resolve them to bytes first.
+   */
   async sendMessage(
     accessToken: string,
     dto: SendMessageDto,
     attachments?: GmailAttachmentInput[],
   ): Promise<{ ok: true; id?: string }> {
+    if (!(dto.to || '').trim()) {
+      throw new BadRequestException('Tambahkan minimal satu penerima');
+    }
     const raw = this.encodeRawMime(this.buildRfc822Mime(dto, attachments));
     const res = await this.post<{ id?: string }>(accessToken, '/users/me/messages/send', {
       raw,
@@ -216,6 +224,14 @@ export class GmailApiClient {
     return { ok: true, id: res.id };
   }
 
+  /**
+   * Save/update a Gmail draft. Returns the draft **message** id (`draft.message.id`)
+   * for FE/Zimbra `draftId` parity — not the Gmail draft resource id.
+   *
+   * Pass resolved attachment bytes as `attachments` (`GmailAttachmentInput[]`).
+   * `dto.attachmentAids` / `attachmentParts` are ignored here by design — Task 5
+   * router must resolve them to bytes first.
+   */
   async saveDraft(
     accessToken: string,
     dto: SendMessageDto,
@@ -223,17 +239,31 @@ export class GmailApiClient {
   ): Promise<{ ok: true; id: string | null }> {
     const raw = this.encodeRawMime(this.buildRfc822Mime(dto, attachments));
     if (dto.draftId) {
-      const res = await this.put<{ id?: string }>(
+      const gmailDraftId = await this.resolveGmailDraftResourceId(
         accessToken,
-        `/users/me/drafts/${encodeURIComponent(dto.draftId)}`,
-        { id: dto.draftId, message: { raw } },
+        dto.draftId,
       );
-      return { ok: true, id: res.id || dto.draftId || null };
+      if (gmailDraftId) {
+        try {
+          const res = await this.put<{ id?: string; message?: { id?: string } }>(
+            accessToken,
+            `/users/me/drafts/${encodeURIComponent(gmailDraftId)}`,
+            { id: gmailDraftId, message: { raw } },
+          );
+          return { ok: true, id: res.message?.id || null };
+        } catch (e) {
+          this.logger.warn(
+            `draft update failed for ${gmailDraftId}, creating new: ${(e as Error).message}`,
+          );
+        }
+      }
     }
-    const res = await this.post<{ id?: string }>(accessToken, '/users/me/drafts', {
-      message: { raw },
-    });
-    return { ok: true, id: res.id || null };
+    const res = await this.post<{ id?: string; message?: { id?: string } }>(
+      accessToken,
+      '/users/me/drafts',
+      { message: { raw } },
+    );
+    return { ok: true, id: res.message?.id || null };
   }
 
   async messageAction(
@@ -649,17 +679,21 @@ export class GmailApiClient {
     const altBoundary = `alt_${Date.now().toString(36)}`;
     const mixedBoundary = `mix_${Date.now().toString(36)}`;
 
+    // UTF-8 bodies must not use 7bit CTE — encode as base64.
+    const textB64 = Buffer.from(text || '', 'utf8').toString('base64');
+    const htmlB64 = Buffer.from(html || '', 'utf8').toString('base64');
+
     const altBody = [
       `--${altBoundary}`,
       'Content-Type: text/plain; charset="UTF-8"',
-      'Content-Transfer-Encoding: 7bit',
+      'Content-Transfer-Encoding: base64',
       '',
-      text || '',
+      this.wrapBase64(textB64),
       `--${altBoundary}`,
       'Content-Type: text/html; charset="UTF-8"',
-      'Content-Transfer-Encoding: 7bit',
+      'Content-Transfer-Encoding: base64',
       '',
-      html || '',
+      this.wrapBase64(htmlB64),
       `--${altBoundary}--`,
     ].join('\r\n');
 
@@ -701,6 +735,25 @@ export class GmailApiClient {
   private encodeHeaderValue(value: string): string {
     if (/^[\x20-\x7E]*$/.test(value)) return value;
     return `=?UTF-8?B?${Buffer.from(value, 'utf8').toString('base64')}?=`;
+  }
+
+  /**
+   * Map FE `draftId` (often a message id for Zimbra parity) to Gmail draft
+   * resource id used by PUT `/users/me/drafts/{id}`.
+   */
+  private async resolveGmailDraftResourceId(
+    accessToken: string,
+    draftOrMessageId: string,
+  ): Promise<string | null> {
+    const list = await this.get<{
+      drafts?: Array<{ id?: string; message?: { id?: string } }>;
+    }>(accessToken, '/users/me/drafts', { maxResults: 100 });
+    const drafts = list.drafts || [];
+    const byDraftId = drafts.find((d) => d.id === draftOrMessageId);
+    if (byDraftId?.id) return byDraftId.id;
+    const byMessageId = drafts.find((d) => d.message?.id === draftOrMessageId);
+    if (byMessageId?.id) return byMessageId.id;
+    return null;
   }
 
   private async resolveUserLabelId(
