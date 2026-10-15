@@ -28,6 +28,7 @@ import { handleException } from '../utils/handleException';
 import { MailboxService } from './mailbox.service';
 import {
   ConnectMailboxDto,
+  FromAmsDriveAttachmentDto,
   FromGdriveAttachmentDto,
   MessageActionDto,
   SaveSignatureDto,
@@ -274,6 +275,22 @@ export class MailboxController {
   ) {
     try {
       const data = await this.mailbox.importGdriveAttachment(
+        req.user!.nik,
+        dto.fileId,
+      );
+      return new CommonResponse('OK', HttpStatus.OK, data);
+    } catch (e) {
+      return handleException(e);
+    }
+  }
+
+  @Post('attachments/from-ams-drive')
+  async fromAmsDrive(
+    @Req() req: Request & { user?: AuthUser },
+    @Body() dto: FromAmsDriveAttachmentDto,
+  ) {
+    try {
+      const data = await this.mailbox.importAmsDriveAttachment(
         req.user!.nik,
         dto.fileId,
       );

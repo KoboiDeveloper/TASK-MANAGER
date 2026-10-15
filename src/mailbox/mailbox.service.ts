@@ -1776,6 +1776,87 @@ export class MailboxService {
   }
 
   /**
+   * Import an existing AMS Drive file into compose: MIME stage (small) or share link (large).
+   * Loads DT_FILE size first so large files never hit getPreviewBuffer (full download).
+   */
+  async importAmsDriveAttachment(nik: string, fileId: string) {
+    if (!fileId?.trim()) {
+      throw new BadRequestException('fileId wajib');
+    }
+    const trimmedId = fileId.trim();
+    const ctx = await this.resolveMailboxContext(nik);
+
+    await this.amsDrive.assertAccess(nik, trimmedId, 'FILE', false);
+    const file = await this.cloudPrisma.dT_FILE.findUnique({
+      where: { id: trimmedId },
+    });
+    if (!file || file.trashedAt) {
+      throw new NotFoundException('File not found');
+    }
+
+    const size = Number(file.bytes);
+    if (!Number.isFinite(size) || size < 0) {
+      throw new BadRequestException('Ukuran file AMS Drive tidak diketahui');
+    }
+    const threshold =
+      ctx.provider === 'gmail'
+        ? MailboxService.GMAIL_MAX_ATTACHMENT_BYTES
+        : MailboxService.AMS_DRIVE_THRESHOLD_BYTES;
+
+    if (size > MailboxService.MAX_ATTACHMENT_BYTES) {
+      throw new BadRequestException('Lampiran maksimal 2GB');
+    }
+
+    if (size > threshold) {
+      let url = file.url || '';
+      if (!url) {
+        url = (await this.amsDrive.getDownloadUrl(nik, trimmedId)).url;
+      }
+      if (!url) {
+        throw new BadRequestException('Gagal membuat tautan AMS Drive');
+      }
+      return {
+        via: 'amsdrive' as const,
+        url,
+        fileId: trimmedId,
+        filename: file.name,
+        size,
+      };
+    }
+
+    const { buffer, name, mimeType } = await this.amsDrive.getPreviewBuffer(
+      nik,
+      trimmedId,
+    );
+
+    if (buffer.length > MailboxService.MAX_ATTACHMENT_BYTES) {
+      throw new BadRequestException('Lampiran maksimal 2GB');
+    }
+    if (buffer.length > threshold) {
+      let url = file.url || '';
+      if (!url) {
+        url = (await this.amsDrive.getDownloadUrl(nik, trimmedId)).url;
+      }
+      if (!url) {
+        throw new BadRequestException('Gagal membuat tautan AMS Drive');
+      }
+      return {
+        via: 'amsdrive' as const,
+        url,
+        fileId: trimmedId,
+        filename: name,
+        size: buffer.length,
+      };
+    }
+
+    return this.stageImportedBuffer(nik, ctx, {
+      filename: name,
+      mimeType: mimeType || 'application/octet-stream',
+      buffer,
+    });
+  }
+
+  /**
    * Prefer active Gmail email only if it has drive.file; else any credential with Drive scope.
    */
   private async resolveDriveAccess(nik: string): Promise<{

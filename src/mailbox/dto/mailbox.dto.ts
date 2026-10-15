@@ -148,3 +148,9 @@ export class FromGdriveAttachmentDto {
   @IsNotEmpty()
   fileId: string;
 }
+
+export class FromAmsDriveAttachmentDto {
+  @IsString()
+  @IsNotEmpty()
+  fileId: string;
+}
