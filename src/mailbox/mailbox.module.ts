@@ -11,6 +11,7 @@ import { MailboxController } from './mailbox.controller';
 import { MailboxService } from './mailbox.service';
 import { MailboxCryptoService } from './mailbox-crypto.service';
 import { ZimbraSoapClient } from './zimbra-soap.client';
+import { GmailApiClient } from './gmail-api.client';
 
 @Module({
   imports: [
@@ -29,7 +30,7 @@ import { ZimbraSoapClient } from './zimbra-soap.client';
     }),
   ],
   controllers: [MailboxController],
-  providers: [MailboxService, MailboxCryptoService, ZimbraSoapClient],
-  exports: [MailboxService, MailboxCryptoService],
+  providers: [MailboxService, MailboxCryptoService, ZimbraSoapClient, GmailApiClient],
+  exports: [MailboxService, MailboxCryptoService, GmailApiClient],
 })
 export class MailboxModule {}
