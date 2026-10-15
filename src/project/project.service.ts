@@ -147,14 +147,18 @@ export class ProjectService {
         viewsList = [{ name: 'List', type: 'list' }];
       }
 
+      let viewRank = '8000000000000000';
       for (const v of viewsList) {
         await tx.dT_VIEWS.create({
           data: {
             projectId: project.id,
             name: v.name,
             type: v.type,
+            rank: viewRank,
+            shortId: this.generateShortId(7),
           },
         });
+        viewRank = this.rankAfter(viewRank);
       }
 
       // creator selalu jadi OWNER
