@@ -26,6 +26,8 @@ import {
   SendMessageDto,
   ToggleReactionDto,
   UpdateRoomDto,
+  UpdatePollEventDto,
+  VotePollDto,
 } from './dto/chat.dto';
 
 type AuthUser = { nik: string; nama?: string; roleId?: string };
@@ -179,6 +181,34 @@ export class ChatController {
     try {
       const data = await this.chatService.toggleReaction(this.nik(req), id, dto);
       return new CommonResponse('Reaction updated', HttpStatus.OK, data);
+    } catch (e) {
+      return handleException((e as Error).message);
+    }
+  }
+
+  @Post('messages/:id/poll/vote')
+  async votePoll(
+    @Req() req: Request & { user?: AuthUser },
+    @Param('id') id: string,
+    @Body() dto: VotePollDto,
+  ) {
+    try {
+      const data = await this.chatService.votePoll(this.nik(req), id, dto);
+      return new CommonResponse('Poll vote updated', HttpStatus.OK, data);
+    } catch (e) {
+      return handleException((e as Error).message);
+    }
+  }
+
+  @Patch('messages/:id/poll-event')
+  async updatePollOrEvent(
+    @Req() req: Request & { user?: AuthUser },
+    @Param('id') id: string,
+    @Body() dto: UpdatePollEventDto,
+  ) {
+    try {
+      const data = await this.chatService.updatePollOrEvent(this.nik(req), id, dto);
+      return new CommonResponse('Message updated', HttpStatus.OK, data);
     } catch (e) {
       return handleException((e as Error).message);
     }

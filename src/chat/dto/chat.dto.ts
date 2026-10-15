@@ -1,4 +1,12 @@
-import { IsArray, IsBoolean, IsIn, IsOptional, IsString, MaxLength, ArrayMinSize } from 'class-validator';
+import {
+  IsArray,
+  IsBoolean,
+  IsIn,
+  IsOptional,
+  IsString,
+  MaxLength,
+  ArrayMinSize,
+} from 'class-validator';
 
 export class CreateRoomDto {
   @IsIn(['dm', 'group'])
@@ -67,8 +75,8 @@ export class SendMessageDto {
   content?: string;
 
   @IsOptional()
-  @IsIn(['text', 'task', 'system', 'file'])
-  type?: 'text' | 'task' | 'system' | 'file';
+  @IsIn(['text', 'task', 'system', 'file', 'poll', 'event'])
+  type?: 'text' | 'task' | 'system' | 'file' | 'poll' | 'event';
 
   @IsOptional()
   taskRef?: Record<string, unknown> | null;
@@ -93,10 +101,61 @@ export class SendMessageDto {
     url?: string | null;
   }>;
 
+  @IsOptional()
+  poll?: {
+    question: string;
+    options: Array<{ id: string; text: string; voterNiks?: string[] }>;
+    allowMultiple: boolean;
+    closed?: boolean;
+    backgroundColor?: string | null;
+  } | null;
+
+  @IsOptional()
+  event?: {
+    name: string;
+    description?: string | null;
+    startAt: string;
+    endAt?: string | null;
+    location?: string | null;
+    lat?: number | null;
+    lng?: number | null;
+    backgroundColor?: string | null;
+  } | null;
+
   /** Optimistic id from FE (socket send) */
   @IsOptional()
   @IsString()
   clientId?: string;
+}
+
+export class VotePollDto {
+  @IsArray()
+  @ArrayMinSize(1)
+  @IsString({ each: true })
+  optionIds!: string[];
+}
+
+export class UpdatePollEventDto {
+  @IsOptional()
+  poll?: {
+    question: string;
+    options: Array<{ id: string; text: string; voterNiks?: string[] }>;
+    allowMultiple: boolean;
+    closed?: boolean;
+    backgroundColor?: string | null;
+  } | null;
+
+  @IsOptional()
+  event?: {
+    name: string;
+    description?: string | null;
+    startAt: string;
+    endAt?: string | null;
+    location?: string | null;
+    lat?: number | null;
+    lng?: number | null;
+    backgroundColor?: string | null;
+  } | null;
 }
 
 export class MarkReadDto {

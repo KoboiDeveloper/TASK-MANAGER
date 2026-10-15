@@ -15,6 +15,8 @@ import {
   SendMessageDto,
   ToggleReactionDto,
   UpdateRoomDto,
+  UpdatePollEventDto,
+  VotePollDto,
 } from './dto/chat.dto';
 import { randomUUID } from 'crypto';
 
@@ -39,6 +41,26 @@ type ChatAttachment = {
   url?: string | null;
 };
 
+type ChatPollOption = { id: string; text: string; voterNiks: string[] };
+type ChatPoll = {
+  question: string;
+  options: ChatPollOption[];
+  allowMultiple: boolean;
+  closed?: boolean;
+  backgroundColor?: string | null;
+};
+
+type ChatEvent = {
+  name: string;
+  description?: string | null;
+  startAt: string;
+  endAt?: string | null;
+  location?: string | null;
+  lat?: number | null;
+  lng?: number | null;
+  backgroundColor?: string | null;
+};
+
 type ChatMessageDto = {
   id: string;
   roomId: string;
@@ -47,6 +69,8 @@ type ChatMessageDto = {
   content: string;
   taskRef: TaskRef | null;
   attachments: ChatAttachment[];
+  poll: ChatPoll | null;
+  event: ChatEvent | null;
   replyToId: string | null;
   reactions: ChatReaction[];
   readBy: string[];
@@ -122,6 +146,8 @@ export class ChatService {
       content: string;
       taskRefJson: string | null;
       attachmentsJson?: string | null;
+      pollJson?: string | null;
+      eventJson?: string | null;
       replyToId: string | null;
       reactionsJson: string | null;
       readByJson: string | null;
@@ -148,6 +174,8 @@ export class ChatService {
       content: m.content,
       taskRef: this.parseJson<TaskRef | null>(m.taskRefJson, null),
       attachments: this.parseJson<ChatAttachment[]>(m.attachmentsJson, []),
+      poll: this.parseJson<ChatPoll | null>(m.pollJson ?? null, null),
+      event: this.parseJson<ChatEvent | null>(m.eventJson ?? null, null),
       replyToId: m.replyToId,
       reactions: this.parseJson<ChatReaction[]>(m.reactionsJson, []),
       readBy,
@@ -625,11 +653,21 @@ export class ChatService {
     await this.assertMember(roomId, nik);
     const type =
       dto.type ??
-      (dto.taskRef ? 'task' : dto.attachments?.length ? 'file' : 'text');
+      (dto.poll
+        ? 'poll'
+        : dto.event
+          ? 'event'
+          : dto.taskRef
+            ? 'task'
+            : dto.attachments?.length
+              ? 'file'
+              : 'text');
     if (type === 'system') throw new BadRequestException('Cannot send system messages');
 
     let taskRefJson: string | null = null;
     let attachmentsJson: string | null = null;
+    let pollJson: string | null = null;
+    let eventJson: string | null = null;
     if (dto.attachments?.length) {
       attachmentsJson = JSON.stringify(dto.attachments);
     }
@@ -662,6 +700,47 @@ export class ChatService {
         taskRefJson = JSON.stringify(dto.taskRef);
       }
     }
+    if (type === 'poll') {
+      if (!dto.poll?.question?.trim() || !Array.isArray(dto.poll.options) || dto.poll.options.length < 2) {
+        throw new BadRequestException('Poll requires a question and at least 2 options');
+      }
+      const options: ChatPollOption[] = dto.poll.options.slice(0, 10).map((o, i) => ({
+        id: String(o.id || `opt-${i + 1}`).slice(0, 40),
+        text: String(o.text || '').trim().slice(0, 200),
+        voterNiks: [],
+      }));
+      if (options.some((o) => !o.text)) {
+        throw new BadRequestException('Poll options cannot be empty');
+      }
+      const poll: ChatPoll = {
+        question: dto.poll.question.trim().slice(0, 500),
+        options,
+        allowMultiple: Boolean(dto.poll.allowMultiple),
+        closed: false,
+        backgroundColor: dto.poll.backgroundColor?.trim()?.slice(0, 20) || null,
+      };
+      pollJson = JSON.stringify(poll);
+    }
+    if (type === 'event') {
+      if (!dto.event?.name?.trim() || !dto.event?.startAt) {
+        throw new BadRequestException('Event requires a name and start time');
+      }
+      const lat =
+        typeof dto.event.lat === 'number' && Number.isFinite(dto.event.lat) ? dto.event.lat : null;
+      const lng =
+        typeof dto.event.lng === 'number' && Number.isFinite(dto.event.lng) ? dto.event.lng : null;
+      const event: ChatEvent = {
+        name: dto.event.name.trim().slice(0, 200),
+        description: dto.event.description?.trim()?.slice(0, 2000) || null,
+        startAt: String(dto.event.startAt),
+        endAt: dto.event.endAt ? String(dto.event.endAt) : null,
+        location: dto.event.location?.trim()?.slice(0, 300) || null,
+        lat,
+        lng,
+        backgroundColor: dto.event.backgroundColor?.trim()?.slice(0, 20) || null,
+      };
+      eventJson = JSON.stringify(event);
+    }
 
     const created = await this.prisma.$transaction(async (tx) => {
       const msg = await tx.dT_CHAT_MESSAGE.create({
@@ -672,6 +751,8 @@ export class ChatService {
           content: dto.content ?? '',
           taskRefJson,
           attachmentsJson,
+          pollJson,
+          eventJson,
           replyToId: dto.replyToId || null,
           reactionsJson: '[]',
           readByJson: JSON.stringify([nik]),
@@ -716,8 +797,12 @@ export class ChatService {
     const preview =
       type === 'task'
         ? `membagikan task`
-        : (dto.content || '').trim().slice(0, 120) ||
-          (dto.attachments?.length ? 'mengirim lampiran' : 'pesan baru');
+        : type === 'poll'
+          ? `polling: ${dto.poll?.question || ''}`.slice(0, 120)
+          : type === 'event'
+            ? `event: ${dto.event?.name || ''}`.slice(0, 120)
+            : (dto.content || '').trim().slice(0, 120) ||
+              (dto.attachments?.length ? 'mengirim lampiran' : 'pesan baru');
     const recipientNiks = members.map((m) => m.nik.trim()).filter((n) => n !== nik);
     const chatUrl = `/dashboard/chat/${roomId}`;
 
@@ -992,6 +1077,128 @@ export class ChatService {
     return pinned.map((p) => this.mapPinned(p));
   }
 
+  async updatePollOrEvent(
+    nik: string,
+    messageId: string,
+    dto: UpdatePollEventDto,
+  ): Promise<ChatMessageDto> {
+    const msg = await this.prisma.dT_CHAT_MESSAGE.findUnique({ where: { id: messageId } });
+    if (!msg || msg.deletedAt) throw new NotFoundException('Message not found');
+    await this.assertMember(msg.roomId, nik);
+    if (msg.senderNik.trim() !== nik) {
+      throw new ForbiddenException('Only the creator can edit this message');
+    }
+
+    let pollJson: string | null | undefined = undefined;
+    let eventJson: string | null | undefined = undefined;
+
+    if (msg.type === 'poll') {
+      if (!dto.poll?.question?.trim() || !Array.isArray(dto.poll.options) || dto.poll.options.length < 2) {
+        throw new BadRequestException('Poll requires a question and at least 2 options');
+      }
+      const existing = this.parseJson<ChatPoll | null>(msg.pollJson, null);
+      const voteMap = new Map(
+        (existing?.options || []).map((o) => [o.id, o.voterNiks || []] as const),
+      );
+      const options: ChatPollOption[] = dto.poll.options.slice(0, 10).map((o, i) => {
+        const id = String(o.id || `opt-${i + 1}`).slice(0, 40);
+        return {
+          id,
+          text: String(o.text || '').trim().slice(0, 200),
+          voterNiks: voteMap.get(id) || [],
+        };
+      });
+      if (options.some((o) => !o.text)) {
+        throw new BadRequestException('Poll options cannot be empty');
+      }
+      pollJson = JSON.stringify({
+        question: dto.poll.question.trim().slice(0, 500),
+        options,
+        allowMultiple: Boolean(dto.poll.allowMultiple),
+        closed: Boolean(dto.poll.closed ?? existing?.closed),
+        backgroundColor: dto.poll.backgroundColor?.trim()?.slice(0, 20) || null,
+      } satisfies ChatPoll);
+    } else if (msg.type === 'event') {
+      if (!dto.event?.name?.trim() || !dto.event?.startAt) {
+        throw new BadRequestException('Event requires a name and start time');
+      }
+      const lat =
+        typeof dto.event.lat === 'number' && Number.isFinite(dto.event.lat) ? dto.event.lat : null;
+      const lng =
+        typeof dto.event.lng === 'number' && Number.isFinite(dto.event.lng) ? dto.event.lng : null;
+      eventJson = JSON.stringify({
+        name: dto.event.name.trim().slice(0, 200),
+        description: dto.event.description?.trim()?.slice(0, 2000) || null,
+        startAt: String(dto.event.startAt),
+        endAt: dto.event.endAt ? String(dto.event.endAt) : null,
+        location: dto.event.location?.trim()?.slice(0, 300) || null,
+        lat,
+        lng,
+        backgroundColor: dto.event.backgroundColor?.trim()?.slice(0, 20) || null,
+      } satisfies ChatEvent);
+    } else {
+      throw new BadRequestException('Only poll or event messages can be edited');
+    }
+
+    const updated = await this.prisma.dT_CHAT_MESSAGE.update({
+      where: { id: messageId },
+      data: {
+        ...(pollJson !== undefined ? { pollJson } : {}),
+        ...(eventJson !== undefined ? { eventJson } : {}),
+        editedAt: new Date(),
+      },
+    });
+    const mapped = this.mapMessage(updated, nik)!;
+    this.gateway.emitToRoom(msg.roomId, 'message:updated', mapped);
+    return mapped;
+  }
+
+  async votePoll(
+    nik: string,
+    messageId: string,
+    dto: VotePollDto,
+  ): Promise<ChatMessageDto> {
+    const msg = await this.prisma.dT_CHAT_MESSAGE.findUnique({ where: { id: messageId } });
+    if (!msg || msg.deletedAt) throw new NotFoundException('Message not found');
+    if (msg.type !== 'poll') throw new BadRequestException('Not a poll message');
+    await this.assertMember(msg.roomId, nik);
+
+    const poll = this.parseJson<ChatPoll | null>(msg.pollJson, null);
+    if (!poll) throw new BadRequestException('Poll data missing');
+    if (poll.closed) throw new BadRequestException('Poll is closed');
+
+    const optionIds = Array.from(new Set((dto.optionIds || []).map((id) => String(id))));
+    if (!optionIds.length) throw new BadRequestException('optionIds required');
+    if (!poll.allowMultiple && optionIds.length > 1) {
+      throw new BadRequestException('Multiple answers not allowed');
+    }
+    const validIds = new Set(poll.options.map((o) => o.id));
+    if (optionIds.some((id) => !validIds.has(id))) {
+      throw new BadRequestException('Invalid option');
+    }
+
+    const voter = nik.trim();
+    const next: ChatPoll = {
+      ...poll,
+      options: poll.options.map((o) => ({
+        ...o,
+        voterNiks: o.voterNiks.filter((n) => n !== voter),
+      })),
+    };
+    for (const optId of optionIds) {
+      const opt = next.options.find((o) => o.id === optId);
+      if (opt && !opt.voterNiks.includes(voter)) opt.voterNiks.push(voter);
+    }
+
+    const updated = await this.prisma.dT_CHAT_MESSAGE.update({
+      where: { id: messageId },
+      data: { pollJson: JSON.stringify(next), editedAt: new Date() },
+    });
+    const mapped = this.mapMessage(updated, nik)!;
+    this.gateway.emitToRoom(msg.roomId, 'message:updated', mapped);
+    return mapped;
+  }
+
   async uploadAttachment(
     nik: string,
     roomId: string,
@@ -999,21 +1206,49 @@ export class ChatService {
   ): Promise<ChatAttachment> {
     await this.assertMember(roomId, nik);
     if (!file?.buffer?.length) throw new BadRequestException('File wajib diunggah');
-    if (file.size > 5 * 1024 * 1024) {
-      throw new BadRequestException('Maksimum ukuran file 5MB');
+    const originalName = file.originalname || 'file';
+    const mimeType = this.resolveUploadMime(file.mimetype, originalName);
+    const isVideo = mimeType.startsWith('video/');
+    const maxBytes = 5 * 1024 * 1024;
+    if (file.size > maxBytes) {
+      throw new BadRequestException(
+        isVideo ? 'Maksimum ukuran video 5MB' : 'Maksimum ukuran file 5MB',
+      );
     }
 
-    const originalName = file.originalname || 'file';
     const safe = originalName.replace(/[^\w.-]+/g, '_');
     const key = `chat/${roomId}/${Date.now()}-${Math.random().toString(36).slice(2)}-${safe}`;
-    const uploaded = await this.storage.uploadFile(key, file.buffer, file.mimetype || 'application/octet-stream');
+    const uploaded = await this.storage.uploadFile(key, file.buffer, mimeType);
 
     return {
       id: randomUUID(),
       name: originalName.slice(0, 120),
-      mimeType: file.mimetype || 'application/octet-stream',
+      mimeType,
       size: file.size,
       url: uploaded.url,
     };
+  }
+
+  /** Fix empty/octet-stream MIME from clients (esp. .webp on Windows). */
+  private resolveUploadMime(mimetype: string | undefined, filename: string): string {
+    const mime = (mimetype || '').toLowerCase().trim();
+    if (mime && mime !== 'application/octet-stream') return mime;
+    const ext = (filename.split('.').pop() || '').toLowerCase();
+    const map: Record<string, string> = {
+      webp: 'image/webp',
+      png: 'image/png',
+      jpg: 'image/jpeg',
+      jpeg: 'image/jpeg',
+      gif: 'image/gif',
+      bmp: 'image/bmp',
+      avif: 'image/avif',
+      svg: 'image/svg+xml',
+      mp4: 'video/mp4',
+      webm: 'video/webm',
+      mov: 'video/quicktime',
+      m4v: 'video/x-m4v',
+      pdf: 'application/pdf',
+    };
+    return map[ext] || mime || 'application/octet-stream';
   }
 }

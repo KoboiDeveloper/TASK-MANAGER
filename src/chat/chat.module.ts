@@ -16,6 +16,7 @@ import { ChatEvents } from './chat.events';
     JwtModule.register({}),
     MulterModule.register({
       storage: memoryStorage(),
+      // Chat attachments (incl. video) capped at 5MB
       limits: { fileSize: 5 * 1024 * 1024 },
     }),
   ],

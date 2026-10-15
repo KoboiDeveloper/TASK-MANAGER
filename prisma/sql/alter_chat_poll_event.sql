@@ -1,0 +1,10 @@
+-- Add poll/event JSON columns on chat messages
+IF COL_LENGTH('dbo.DT_CHAT_MESSAGE', 'pollJson') IS NULL
+BEGIN
+  ALTER TABLE dbo.DT_CHAT_MESSAGE ADD pollJson NVARCHAR(MAX) NULL;
+END;
+
+IF COL_LENGTH('dbo.DT_CHAT_MESSAGE', 'eventJson') IS NULL
+BEGIN
+  ALTER TABLE dbo.DT_CHAT_MESSAGE ADD eventJson NVARCHAR(MAX) NULL;
+END;

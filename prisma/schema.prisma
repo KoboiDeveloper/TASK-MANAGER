@@ -524,10 +524,12 @@ model DT_CHAT_MESSAGE {
   roomId        String    @db.UniqueIdentifier
   /// "system" for system messages — no FK (not a real user nik)
   senderNik     String    @db.VarChar(20)
-  type          String    @default("text") @db.VarChar(10) // text | task | system | file
+  type          String    @default("text") @db.VarChar(10) // text | task | system | file | poll | event
   content       String    @db.NVarChar(Max)
   taskRefJson   String?   @db.NVarChar(Max)
   attachmentsJson String? @db.NVarChar(Max)
+  pollJson      String?   @db.NVarChar(Max)
+  eventJson     String?   @db.NVarChar(Max)
   replyToId     String?   @db.UniqueIdentifier
   reactionsJson String?   @db.NVarChar(Max)
   readByJson    String?   @db.NVarChar(Max)
