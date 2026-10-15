@@ -13,7 +13,6 @@ import { MailboxCryptoService } from '../mailbox/mailbox-crypto.service';
 import { MailboxService, type CalendarEvent as ZimbraCalendarEvent } from '../mailbox/mailbox.service';
 import {
   GoogleOAuthClient,
-  GOOGLE_SCOPES,
   hasCalendarScope,
   hasGmailScope,
   type GoogleCalendarEventRaw,
@@ -219,7 +218,7 @@ export class GoogleCalendarService {
         refreshTokenIv: refreshEnc.iv,
         refreshTokenTag: refreshEnc.tag,
         accessTokenExpiresAt: expiresAt,
-        scope: tokens.scope ?? GOOGLE_SCOPES,
+        scope: tokens.scope ?? null,
       },
       update: {
         ...(displayName ? { displayName } : {}),
@@ -230,7 +229,7 @@ export class GoogleCalendarService {
         refreshTokenIv: refreshEnc.iv,
         refreshTokenTag: refreshEnc.tag,
         accessTokenExpiresAt: expiresAt,
-        scope: tokens.scope ?? GOOGLE_SCOPES,
+        ...(tokens.scope ? { scope: tokens.scope } : {}),
       },
     });
 
