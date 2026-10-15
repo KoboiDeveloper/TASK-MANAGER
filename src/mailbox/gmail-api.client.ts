@@ -5,7 +5,14 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import axios, { AxiosError } from 'axios';
+import type { MessageActionDto, SendMessageDto } from './dto/mailbox.dto';
 import type { FolderNode, MessageSummary } from './mailbox.service';
+
+export type GmailAttachmentInput = {
+  filename: string;
+  contentType: string;
+  contentBase64: string;
+};
 
 const GMAIL_API = 'https://gmail.googleapis.com/gmail/v1';
 
@@ -37,6 +44,9 @@ const META_LABELS = new Set([
   'CATEGORY_UPDATES',
   'CATEGORY_FORUMS',
 ]);
+
+/** System folder labels removed on move (keep UNREAD / STARRED / IMPORTANT). */
+const MOVE_REMOVE_LABELS = ['INBOX', 'SENT', 'DRAFT', 'SPAM', 'TRASH'] as const;
 
 type GmailLabel = {
   id?: string;
@@ -192,6 +202,191 @@ export class GmailApiClient {
       conversationId: raw.threadId || null,
       inReplyTo: this.header(headers, 'In-Reply-To') || null,
     };
+  }
+
+  async sendMessage(
+    accessToken: string,
+    dto: SendMessageDto,
+    attachments?: GmailAttachmentInput[],
+  ): Promise<{ ok: true; id?: string }> {
+    const raw = this.encodeRawMime(this.buildRfc822Mime(dto, attachments));
+    const res = await this.post<{ id?: string }>(accessToken, '/users/me/messages/send', {
+      raw,
+    });
+    return { ok: true, id: res.id };
+  }
+
+  async saveDraft(
+    accessToken: string,
+    dto: SendMessageDto,
+    attachments?: GmailAttachmentInput[],
+  ): Promise<{ ok: true; id: string | null }> {
+    const raw = this.encodeRawMime(this.buildRfc822Mime(dto, attachments));
+    if (dto.draftId) {
+      const res = await this.put<{ id?: string }>(
+        accessToken,
+        `/users/me/drafts/${encodeURIComponent(dto.draftId)}`,
+        { id: dto.draftId, message: { raw } },
+      );
+      return { ok: true, id: res.id || dto.draftId || null };
+    }
+    const res = await this.post<{ id?: string }>(accessToken, '/users/me/drafts', {
+      message: { raw },
+    });
+    return { ok: true, id: res.id || null };
+  }
+
+  async messageAction(
+    accessToken: string,
+    id: string,
+    dto: MessageActionDto,
+  ): Promise<{ ok: true }> {
+    const op = String(dto.op || '').toLowerCase();
+    const encId = encodeURIComponent(id);
+
+    switch (op) {
+      case 'read':
+        await this.post(accessToken, `/users/me/messages/${encId}/modify`, {
+          removeLabelIds: ['UNREAD'],
+        });
+        break;
+      case 'unread':
+      case '!read':
+        await this.post(accessToken, `/users/me/messages/${encId}/modify`, {
+          addLabelIds: ['UNREAD'],
+        });
+        break;
+      case 'flag':
+        await this.post(accessToken, `/users/me/messages/${encId}/modify`, {
+          addLabelIds: ['STARRED'],
+        });
+        break;
+      case 'unflag':
+      case '!flag':
+        await this.post(accessToken, `/users/me/messages/${encId}/modify`, {
+          removeLabelIds: ['STARRED'],
+        });
+        break;
+      case 'trash':
+        await this.post(accessToken, `/users/me/messages/${encId}/trash`, {});
+        break;
+      case 'delete':
+        await this.delete(accessToken, `/users/me/messages/${encId}`);
+        break;
+      case 'spam':
+        await this.post(accessToken, `/users/me/messages/${encId}/modify`, {
+          addLabelIds: ['SPAM'],
+          removeLabelIds: ['INBOX'],
+        });
+        break;
+      case 'unspam':
+      case '!spam':
+        await this.post(accessToken, `/users/me/messages/${encId}/modify`, {
+          removeLabelIds: ['SPAM'],
+          addLabelIds: ['INBOX'],
+        });
+        break;
+      case 'move': {
+        if (!dto.folderId) {
+          throw new BadRequestException('folderId wajib untuk operasi move');
+        }
+        const removeLabelIds = MOVE_REMOVE_LABELS.filter((l) => l !== dto.folderId);
+        await this.post(accessToken, `/users/me/messages/${encId}/modify`, {
+          addLabelIds: [dto.folderId],
+          removeLabelIds,
+        });
+        break;
+      }
+      case 'tag': {
+        if (!dto.tagName?.trim()) {
+          throw new BadRequestException('tagName wajib untuk operasi tag');
+        }
+        const labelId = await this.resolveUserLabelId(accessToken, dto.tagName.trim(), true);
+        await this.post(accessToken, `/users/me/messages/${encId}/modify`, {
+          addLabelIds: [labelId],
+        });
+        break;
+      }
+      case 'untag':
+      case '!tag': {
+        if (!dto.tagName?.trim()) {
+          throw new BadRequestException('tagName wajib untuk operasi untag');
+        }
+        const labelId = await this.resolveUserLabelId(accessToken, dto.tagName.trim(), false);
+        if (labelId) {
+          await this.post(accessToken, `/users/me/messages/${encId}/modify`, {
+            removeLabelIds: [labelId],
+          });
+        }
+        break;
+      }
+      default:
+        throw new BadRequestException(`Operasi tidak dikenal: ${dto.op}`);
+    }
+    return { ok: true };
+  }
+
+  async downloadAttachment(
+    accessToken: string,
+    messageId: string,
+    attachmentId: string,
+  ): Promise<{ data: Buffer; size: number }> {
+    const res = await this.get<{ data?: string; size?: number }>(
+      accessToken,
+      `/users/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`,
+    );
+    const data = this.decodeBodyToBuffer(res.data || '');
+    return { data, size: Number(res.size ?? data.length) };
+  }
+
+  async listTags(
+    accessToken: string,
+  ): Promise<Array<{ id: string; name: string; color: null }>> {
+    const data = await this.get<{ labels?: GmailLabel[] }>(
+      accessToken,
+      '/users/me/labels',
+    );
+    return (data.labels || [])
+      .filter((l) => l.type === 'user' && l.id && l.name)
+      .map((l) => ({ id: String(l.id), name: String(l.name), color: null }));
+  }
+
+  async listSignatures(
+    accessToken: string,
+  ): Promise<{
+    signatures: Array<{ id: string; name: string; html: string }>;
+    defaultId: string | null;
+  }> {
+    try {
+      const data = await this.get<{
+        sendAs?: Array<{
+          sendAsEmail?: string;
+          displayName?: string;
+          signature?: string;
+          isDefault?: boolean;
+          isPrimary?: boolean;
+        }>;
+      }>(accessToken, '/users/me/settings/sendAs');
+      const rows = data.sendAs || [];
+      const signatures = rows.map((s) => ({
+        id: String(s.sendAsEmail || ''),
+        name: String(s.displayName || s.sendAsEmail || ''),
+        html: String(s.signature || ''),
+      }));
+      const def =
+        rows.find((s) => s.isDefault) ||
+        rows.find((s) => s.isPrimary) ||
+        null;
+      return {
+        signatures,
+        defaultId: def?.sendAsEmail ? String(def.sendAsEmail) : null,
+      };
+    } catch (e) {
+      this.logger.warn(
+        `listSignatures failed (best-effort): ${(e as Error).message}`,
+      );
+      return { signatures: [], defaultId: null };
+    }
   }
 
   private async batchGetMetadata(
@@ -409,8 +604,136 @@ export class GmailApiClient {
   }
 
   private decodeBody(data: string): string {
+    return this.decodeBodyToBuffer(data).toString('utf8');
+  }
+
+  private decodeBodyToBuffer(data: string): Buffer {
     const b64 = data.replace(/-/g, '+').replace(/_/g, '/');
-    return Buffer.from(b64, 'base64').toString('utf8');
+    return Buffer.from(b64, 'base64');
+  }
+
+  private encodeRawMime(mime: string): string {
+    return Buffer.from(mime, 'utf8')
+      .toString('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
+  }
+
+  private buildRfc822Mime(
+    dto: SendMessageDto,
+    attachments?: GmailAttachmentInput[],
+  ): string {
+    const to = (dto.to || '').trim();
+    const cc = (dto.cc || '').trim();
+    const bcc = (dto.bcc || '').trim();
+    const subject = dto.subject || '';
+    const html = dto.bodyHtml || '';
+    const text =
+      (dto.bodyText || '').trim() ||
+      html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    const inReplyTo = (dto.inReplyTo || '').trim();
+    const atts = attachments || [];
+
+    const headers: string[] = [];
+    if (to) headers.push(`To: ${to}`);
+    if (cc) headers.push(`Cc: ${cc}`);
+    if (bcc) headers.push(`Bcc: ${bcc}`);
+    headers.push(`Subject: ${this.encodeHeaderValue(subject)}`);
+    headers.push('MIME-Version: 1.0');
+    if (inReplyTo) {
+      headers.push(`In-Reply-To: ${inReplyTo}`);
+      headers.push(`References: ${inReplyTo}`);
+    }
+
+    const altBoundary = `alt_${Date.now().toString(36)}`;
+    const mixedBoundary = `mix_${Date.now().toString(36)}`;
+
+    const altBody = [
+      `--${altBoundary}`,
+      'Content-Type: text/plain; charset="UTF-8"',
+      'Content-Transfer-Encoding: 7bit',
+      '',
+      text || '',
+      `--${altBoundary}`,
+      'Content-Type: text/html; charset="UTF-8"',
+      'Content-Transfer-Encoding: 7bit',
+      '',
+      html || '',
+      `--${altBoundary}--`,
+    ].join('\r\n');
+
+    if (!atts.length) {
+      headers.push(`Content-Type: multipart/alternative; boundary="${altBoundary}"`);
+      return `${headers.join('\r\n')}\r\n\r\n${altBody}\r\n`;
+    }
+
+    headers.push(`Content-Type: multipart/mixed; boundary="${mixedBoundary}"`);
+    const parts: string[] = [
+      `--${mixedBoundary}`,
+      `Content-Type: multipart/alternative; boundary="${altBoundary}"`,
+      '',
+      altBody,
+    ];
+    for (const att of atts) {
+      const filename = att.filename || 'attachment';
+      const ct = att.contentType || 'application/octet-stream';
+      const b64 = (att.contentBase64 || '').replace(/\s+/g, '');
+      parts.push(
+        `--${mixedBoundary}`,
+        `Content-Type: ${ct}; name="${filename.replace(/"/g, '')}"`,
+        'Content-Transfer-Encoding: base64',
+        `Content-Disposition: attachment; filename="${filename.replace(/"/g, '')}"`,
+        '',
+        this.wrapBase64(b64),
+      );
+    }
+    parts.push(`--${mixedBoundary}--`);
+    return `${headers.join('\r\n')}\r\n\r\n${parts.join('\r\n')}\r\n`;
+  }
+
+  private wrapBase64(b64: string): string {
+    const lines: string[] = [];
+    for (let i = 0; i < b64.length; i += 76) lines.push(b64.slice(i, i + 76));
+    return lines.join('\r\n');
+  }
+
+  private encodeHeaderValue(value: string): string {
+    if (/^[\x20-\x7E]*$/.test(value)) return value;
+    return `=?UTF-8?B?${Buffer.from(value, 'utf8').toString('base64')}?=`;
+  }
+
+  private async resolveUserLabelId(
+    accessToken: string,
+    name: string,
+    createIfMissing: true,
+  ): Promise<string>;
+  private async resolveUserLabelId(
+    accessToken: string,
+    name: string,
+    createIfMissing: false,
+  ): Promise<string | null>;
+  private async resolveUserLabelId(
+    accessToken: string,
+    name: string,
+    createIfMissing: boolean,
+  ): Promise<string | null> {
+    const data = await this.get<{ labels?: GmailLabel[] }>(
+      accessToken,
+      '/users/me/labels',
+    );
+    const found = (data.labels || []).find(
+      (l) => l.type === 'user' && l.name === name && l.id,
+    );
+    if (found?.id) return found.id;
+    if (!createIfMissing) return null;
+    const created = await this.post<{ id?: string }>(accessToken, '/users/me/labels', {
+      name,
+      labelListVisibility: 'labelShow',
+      messageListVisibility: 'show',
+    });
+    if (!created.id) throw new BadRequestException('Gagal membuat label Gmail');
+    return created.id;
   }
 
   private header(headers: GmailHeader[], name: string): string {
@@ -423,6 +746,10 @@ export class GmailApiClient {
     return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
+  private authHeaders(accessToken: string) {
+    return { Authorization: `Bearer ${accessToken}` };
+  }
+
   private async get<T>(
     accessToken: string,
     path: string,
@@ -430,7 +757,7 @@ export class GmailApiClient {
   ): Promise<T> {
     try {
       const { data } = await axios.get<T>(`${GMAIL_API}${path}`, {
-        headers: { Authorization: `Bearer ${accessToken}` },
+        headers: this.authHeaders(accessToken),
         params,
         paramsSerializer: {
           serialize: (p) => {
@@ -446,6 +773,78 @@ export class GmailApiClient {
             return sp.toString();
           },
         },
+        timeout: 30_000,
+      });
+      return data;
+    } catch (e) {
+      throw this.wrapError(e, path);
+    }
+  }
+
+  private async post<T>(
+    accessToken: string,
+    path: string,
+    body?: unknown,
+  ): Promise<T> {
+    try {
+      const { data } = await axios.post<T>(`${GMAIL_API}${path}`, body ?? {}, {
+        headers: {
+          ...this.authHeaders(accessToken),
+          'Content-Type': 'application/json',
+        },
+        timeout: 30_000,
+      });
+      return data;
+    } catch (e) {
+      throw this.wrapError(e, path);
+    }
+  }
+
+  private async put<T>(
+    accessToken: string,
+    path: string,
+    body?: unknown,
+  ): Promise<T> {
+    try {
+      const { data } = await axios.put<T>(`${GMAIL_API}${path}`, body ?? {}, {
+        headers: {
+          ...this.authHeaders(accessToken),
+          'Content-Type': 'application/json',
+        },
+        timeout: 30_000,
+      });
+      return data;
+    } catch (e) {
+      throw this.wrapError(e, path);
+    }
+  }
+
+  private async patch<T>(
+    accessToken: string,
+    path: string,
+    body?: unknown,
+  ): Promise<T> {
+    try {
+      const { data } = await axios.patch<T>(`${GMAIL_API}${path}`, body ?? {}, {
+        headers: {
+          ...this.authHeaders(accessToken),
+          'Content-Type': 'application/json',
+        },
+        timeout: 30_000,
+      });
+      return data;
+    } catch (e) {
+      throw this.wrapError(e, path);
+    }
+  }
+
+  private async delete<T = unknown>(
+    accessToken: string,
+    path: string,
+  ): Promise<T> {
+    try {
+      const { data } = await axios.delete<T>(`${GMAIL_API}${path}`, {
+        headers: this.authHeaders(accessToken),
         timeout: 30_000,
       });
       return data;
