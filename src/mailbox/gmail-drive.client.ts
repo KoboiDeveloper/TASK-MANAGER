@@ -127,6 +127,105 @@ export class GmailDriveClient {
     };
   }
 
+  async getFileMeta(
+    accessToken: string,
+    fileId: string,
+  ): Promise<{
+    id: string;
+    name: string;
+    mimeType: string;
+    size: number;
+    webViewLink?: string;
+  }> {
+    try {
+      const res = await axios.get(
+        `${DRIVE_API}/files/${encodeURIComponent(fileId)}`,
+        {
+          headers: { Authorization: `Bearer ${accessToken}` },
+          params: {
+            fields: 'id,name,mimeType,size,webViewLink',
+            supportsAllDrives: true,
+          },
+          timeout: 20_000,
+        },
+      );
+      const d = res.data || {};
+      return {
+        id: String(d.id || fileId),
+        name: String(d.name || 'file'),
+        mimeType: String(d.mimeType || 'application/octet-stream'),
+        size: Number(d.size || 0),
+        webViewLink: d.webViewLink ? String(d.webViewLink) : undefined,
+      };
+    } catch (e) {
+      this.rethrowDrive(e, 'Gagal membaca metadata Drive');
+    }
+  }
+
+  async downloadFile(accessToken: string, fileId: string): Promise<Buffer> {
+    try {
+      const res = await axios.get(
+        `${DRIVE_API}/files/${encodeURIComponent(fileId)}`,
+        {
+          headers: { Authorization: `Bearer ${accessToken}` },
+          params: { alt: 'media', supportsAllDrives: true },
+          responseType: 'arraybuffer',
+          maxContentLength: Infinity,
+          maxBodyLength: Infinity,
+          timeout: 30 * 60_000,
+        },
+      );
+      return Buffer.from(res.data);
+    } catch (e) {
+      this.rethrowDrive(e, 'Download Drive gagal');
+    }
+  }
+
+  /** Ensure anyone-with-link reader; return webViewLink (fallback constructed URL). */
+  async ensureAnyoneReader(
+    accessToken: string,
+    fileId: string,
+  ): Promise<string> {
+    try {
+      await axios.post(
+        `${DRIVE_API}/files/${encodeURIComponent(fileId)}/permissions`,
+        { role: 'reader', type: 'anyone' },
+        {
+          headers: { Authorization: `Bearer ${accessToken}` },
+          params: { supportsAllDrives: true },
+          timeout: 30_000,
+        },
+      );
+    } catch (e) {
+      const ax = e as AxiosError<{ error?: { message?: string } }>;
+      const msg = ax.response?.data?.error?.message || (e as Error).message;
+      if (!/already|duplicate/i.test(msg)) {
+        this.rethrowDrive(e, 'Gagal set permission Anyone with link');
+      }
+    }
+
+    let url = '';
+    try {
+      const metaRes = await axios.get(
+        `${DRIVE_API}/files/${encodeURIComponent(fileId)}`,
+        {
+          headers: { Authorization: `Bearer ${accessToken}` },
+          params: { fields: 'webViewLink,webContentLink' },
+          timeout: 20_000,
+        },
+      );
+      url = String(
+        metaRes.data?.webViewLink || metaRes.data?.webContentLink || '',
+      );
+    } catch {
+      /* best-effort */
+    }
+    if (!url) {
+      url = `https://drive.google.com/file/d/${fileId}/view`;
+    }
+    return url;
+  }
+
   async grantReaders(
     accessToken: string,
     fileId: string,

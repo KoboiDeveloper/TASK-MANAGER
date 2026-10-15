@@ -1,4 +1,4 @@
-import { IsBoolean, IsEmail, IsNumber, IsOptional, IsString, MinLength } from 'class-validator';
+import { IsBoolean, IsEmail, IsNotEmpty, IsNumber, IsOptional, IsString, MinLength } from 'class-validator';
 
 export class ConnectMailboxDto {
   @IsEmail()
@@ -141,4 +141,10 @@ export class CreateMailboxEventDto {
   @IsOptional()
   @IsString()
   folderId?: string;
+}
+
+export class FromGdriveAttachmentDto {
+  @IsString()
+  @IsNotEmpty()
+  fileId: string;
 }

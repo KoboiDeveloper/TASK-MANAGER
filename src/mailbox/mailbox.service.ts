@@ -1688,6 +1688,81 @@ export class MailboxService {
    * Prefer active Gmail mailbox; else any Google credential with drive.file.
    */
   async getGooglePickerConfig(nik: string) {
+    const { googleEmail, accessToken } =
+      await this.resolveDriveAccess(nik);
+    const clientId =
+      process.env.GOOGLE_OAUTH_CLIENT_ID || process.env.GOOGLE_CLIENT_ID;
+    const apiKey = process.env.GOOGLE_PICKER_API_KEY;
+    if (!clientId || !apiKey) {
+      throw new BadRequestException(
+        'Google Picker belum dikonfigurasi di server',
+      );
+    }
+    return { clientId, apiKey, accessToken, googleEmail };
+  }
+
+  /**
+   * Import an existing Google Drive file into compose: MIME stage (small) or share link (large).
+   */
+  async importGdriveAttachment(nik: string, fileId: string) {
+    if (!fileId?.trim()) {
+      throw new BadRequestException('fileId wajib');
+    }
+    const ctx = await this.resolveMailboxContext(nik);
+    const { accessToken } = await this.resolveDriveAccess(nik);
+    const meta = await this.gmailDrive.getFileMeta(accessToken, fileId.trim());
+
+    if (
+      String(meta.mimeType || '').startsWith('application/vnd.google-apps.')
+    ) {
+      throw new BadRequestException(
+        'File Google Docs/Sheets tidak bisa dilampirkan langsung — export dulu ke PDF/DOCX',
+      );
+    }
+
+    const size = Number(meta.size || 0);
+    const threshold =
+      ctx.provider === 'gmail'
+        ? MailboxService.GMAIL_MAX_ATTACHMENT_BYTES
+        : MailboxService.AMS_DRIVE_THRESHOLD_BYTES;
+
+    if (size > MailboxService.MAX_ATTACHMENT_BYTES) {
+      throw new BadRequestException('Lampiran maksimal 2GB');
+    }
+
+    if (size > threshold) {
+      const url = await this.gmailDrive.ensureAnyoneReader(
+        accessToken,
+        fileId.trim(),
+      );
+      return {
+        via: 'gdrive' as const,
+        url,
+        fileId: meta.id || fileId.trim(),
+        filename: meta.name,
+        size,
+        shareMode: 'anyone' as const,
+      };
+    }
+
+    const buffer = await this.gmailDrive.downloadFile(
+      accessToken,
+      fileId.trim(),
+    );
+    return this.stageImportedBuffer(nik, ctx, {
+      filename: meta.name,
+      mimeType: meta.mimeType || 'application/octet-stream',
+      buffer,
+    });
+  }
+
+  /**
+   * Prefer active Gmail email only if it has drive.file; else any credential with Drive scope.
+   */
+  private async resolveDriveAccess(nik: string): Promise<{
+    googleEmail: string;
+    accessToken: string;
+  }> {
     const ctx = await this.resolveMailboxContext(nik);
     const rows = await this.prisma.dT_GOOGLE_CREDENTIAL.findMany({
       where: { nik },
@@ -1710,15 +1785,65 @@ export class MailboxService {
       );
     }
     const accessToken = await this.getGoogleAccessToken(nik, email);
-    const clientId =
-      process.env.GOOGLE_OAUTH_CLIENT_ID || process.env.GOOGLE_CLIENT_ID;
-    const apiKey = process.env.GOOGLE_PICKER_API_KEY;
-    if (!clientId || !apiKey) {
-      throw new BadRequestException(
-        'Google Picker belum dikonfigurasi di server',
-      );
+    return { googleEmail: email, accessToken };
+  }
+
+  /** Stage/upload a buffer as a small MIME attachment (gmail disk stage or zimbra upload). */
+  private async stageImportedBuffer(
+    nik: string,
+    ctx: { provider: MailboxProvider; email: string },
+    input: { filename: string; mimeType: string; buffer: Buffer },
+  ) {
+    const filename = input.filename || 'file';
+    const mime = input.mimeType || 'application/octet-stream';
+    const size = input.buffer?.length ?? 0;
+    if (!size) {
+      throw new BadRequestException('File Drive kosong');
     }
-    return { clientId, apiKey, accessToken, googleEmail: email };
+
+    if (ctx.provider === 'gmail') {
+      const aid = `gma-${randomUUID()}`;
+      const dir = join(tmpdir(), 'mailbox-gmail-att', nik.trim());
+      await mkdir(dir, { recursive: true });
+      const dest = join(dir, aid);
+      await writeFile(dest, input.buffer);
+      this.gmailStaged.set(aid, {
+        nik: nik.trim(),
+        path: dest,
+        filename,
+        contentType: mime,
+        size,
+      });
+      return {
+        via: 'gmail' as const,
+        aid,
+        filename,
+        size,
+        expiresAt: null,
+        passwordProtected: false,
+      };
+    }
+
+    const zimbraFile = {
+      buffer: input.buffer,
+      originalname: filename,
+      mimetype: mime,
+      size,
+    };
+    const zimbra = await this.withAuth(nik, (token) =>
+      this.zimbra.uploadAttachment(
+        token,
+        zimbraFile as Express.Multer.File,
+      ),
+    );
+    return {
+      via: 'zimbra' as const,
+      aid: zimbra.aid,
+      filename,
+      size,
+      expiresAt: null,
+      passwordProtected: false,
+    };
   }
 
   /**

@@ -28,6 +28,7 @@ import { handleException } from '../utils/handleException';
 import { MailboxService } from './mailbox.service';
 import {
   ConnectMailboxDto,
+  FromGdriveAttachmentDto,
   MessageActionDto,
   SaveSignatureDto,
   SendMessageDto,
@@ -261,6 +262,22 @@ export class MailboxController {
     try {
       const data = await this.mailbox.saveSignature(req.user!.nik, dto);
       return new CommonResponse('Signature saved', HttpStatus.OK, data);
+    } catch (e) {
+      return handleException(e);
+    }
+  }
+
+  @Post('attachments/from-gdrive')
+  async fromGdrive(
+    @Req() req: Request & { user?: AuthUser },
+    @Body() dto: FromGdriveAttachmentDto,
+  ) {
+    try {
+      const data = await this.mailbox.importGdriveAttachment(
+        req.user!.nik,
+        dto.fileId,
+      );
+      return new CommonResponse('OK', HttpStatus.OK, data);
     } catch (e) {
       return handleException(e);
     }
