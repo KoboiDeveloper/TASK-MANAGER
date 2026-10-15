@@ -591,8 +591,19 @@ export class MailboxService {
 
   async searchMessages(
     nik: string,
-    opts: { folderId?: string; query?: string; offset?: number; limit?: number },
-  ): Promise<{ messages: MessageSummary[]; more: boolean; offset: number }> {
+    opts: {
+      folderId?: string;
+      query?: string;
+      offset?: number;
+      limit?: number;
+      pageToken?: string;
+    },
+  ): Promise<{
+    messages: MessageSummary[];
+    more: boolean;
+    offset: number;
+    nextPageToken?: string;
+  }> {
     const limit = Math.min(Math.max(opts.limit ?? 50, 1), 100);
     const offset = Math.max(opts.offset ?? 0, 0);
     const ctx = await this.resolveMailboxContext(nik);
@@ -602,11 +613,13 @@ export class MailboxService {
         labelIds: opts.folderId ? [opts.folderId] : undefined,
         q: opts.query?.trim() || undefined,
         maxResults: limit,
+        pageToken: opts.pageToken,
       });
       return {
         messages: res.messages,
         more: res.more,
         offset,
+        nextPageToken: res.nextPageToken,
       };
     }
 

@@ -156,6 +156,7 @@ export class MailboxController {
     @Query('query') query?: string,
     @Query('offset') offset?: string,
     @Query('limit') limit?: string,
+    @Query('pageToken') pageToken?: string,
   ) {
     try {
       const data = await this.mailbox.searchMessages(req.user!.nik, {
@@ -163,6 +164,7 @@ export class MailboxController {
         query,
         offset: offset ? Number(offset) : 0,
         limit: limit ? Number(limit) : 50,
+        pageToken: pageToken?.trim() || undefined,
       });
       return new CommonResponse('Messages', HttpStatus.OK, data);
     } catch (e) {
