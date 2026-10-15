@@ -215,6 +215,21 @@ export class AuthController {
     }
   }
 
+  /** Soft check — always 200; { connected: false } when no/invalid Cloud cookie. */
+  @Get('status')
+  async connectionStatus(@Req() request: Request) {
+    const cookies = (request.cookies as Record<string, string>) || {};
+    let token = cookies['cloud_access_token'];
+    if (!token) {
+      const authHeader = request.headers['authorization'];
+      if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
+        token = authHeader.slice(7).trim();
+      }
+    }
+    const data = await this.authService.connectionStatus(token);
+    return new CommonResponse('Cloud status', HttpStatus.OK, data);
+  }
+
   @UseGuards(AuthGuard)
   @Get('user-info')
   async getUserInfo(@Req() request: Request) {

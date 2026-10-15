@@ -541,4 +541,29 @@ export class AuthService {
         : undefined,
     };
   }
+
+  /** Soft probe — never throws; used by FE so unbound Cloud does not spam 401. */
+  async connectionStatus(
+    accessToken?: string,
+  ): Promise<{ connected: boolean; user?: GetInfoUserResponse }> {
+    if (!accessToken?.trim()) return { connected: false };
+    try {
+      const payload = await this.jwtService.verifyAsync<JwtPayload>(accessToken, {
+        secret: this.getAccessSecret(),
+        issuer: this.getIssuer(),
+      });
+      if (payload.type === 'refresh' || payload.type === 'ws') {
+        return { connected: false };
+      }
+      const userInDb = await this.prisma.dT_USER.findUnique({
+        where: { nik: payload.nik },
+        select: { statusActive: true },
+      });
+      if (!userInDb?.statusActive) return { connected: false };
+      const user = await this.userInfo(payload.nik);
+      return { connected: true, user };
+    } catch {
+      return { connected: false };
+    }
+  }
 }
