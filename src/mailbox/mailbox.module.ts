@@ -7,15 +7,20 @@ import { tmpdir } from 'os';
 import { extname } from 'path';
 import { PrismaModule } from '../prisma/prisma.module';
 import { StorageModule } from '../storage/storage.module';
+import { GoogleOAuthClient } from '../google-calendar/google-oauth.client';
 import { MailboxController } from './mailbox.controller';
 import { MailboxService } from './mailbox.service';
 import { MailboxCryptoService } from './mailbox-crypto.service';
 import { ZimbraSoapClient } from './zimbra-soap.client';
+import { GmailApiClient } from './gmail-api.client';
+import { GmailDriveClient } from './gmail-drive.client';
+import { CloudDriveModule } from '../cloud/drive/drive.module';
 
 @Module({
   imports: [
     PrismaModule,
     StorageModule,
+    CloudDriveModule,
     JwtModule.register({}),
     MulterModule.register({
       storage: diskStorage({
@@ -29,7 +34,14 @@ import { ZimbraSoapClient } from './zimbra-soap.client';
     }),
   ],
   controllers: [MailboxController],
-  providers: [MailboxService, MailboxCryptoService, ZimbraSoapClient],
-  exports: [MailboxService, MailboxCryptoService],
+  providers: [
+    MailboxService,
+    MailboxCryptoService,
+    ZimbraSoapClient,
+    GmailApiClient,
+    GmailDriveClient,
+    GoogleOAuthClient,
+  ],
+  exports: [MailboxService, MailboxCryptoService, GmailApiClient],
 })
 export class MailboxModule {}

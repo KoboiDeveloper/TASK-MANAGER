@@ -37,7 +37,8 @@ model DT_USER {
   receivedInvites    LOG_INVITATION_PROJECT[] @relation("ReceiverInvites")
   refreshTokens      LOG_REFRESH_TOKEN[]
   mailboxCredentials DT_MAILBOX_CREDENTIAL[]
-  googleCalendarCredentials DT_GOOGLE_CALENDAR_CREDENTIAL[]
+  mailboxSavedAttachments DT_MAILBOX_SAVED_ATTACHMENT[]
+  googleCredentials DT_GOOGLE_CREDENTIAL[]
   zimbraGoogleEventSyncs DT_ZIMBRA_GOOGLE_EVENT_SYNC[]
   chatMemberships    DT_CHAT_MEMBER[]
   chatRoomsCreated   DT_CHAT_ROOM[]           @relation("ChatRoomsCreated")
@@ -581,11 +582,32 @@ model DT_MAILBOX_CREDENTIAL {
   @@index([nik])
 }
 
-model DT_GOOGLE_CALENDAR_CREDENTIAL {
+
+model DT_MAILBOX_SAVED_ATTACHMENT {
+  id           String   @id @db.VarChar(36)
+  nik          String   @db.Char(8)
+  mailboxEmail String   @db.NVarChar(255)
+  messageId    String   @db.NVarChar(255)
+  part         String   @db.NVarChar(64)
+  via          String   @db.VarChar(16) // gdrive | amsdrive
+  url          String   @db.NVarChar(1000)
+  fileId       String?  @db.NVarChar(255)
+  filename     String?  @db.NVarChar(500)
+  updatedAt    DateTime @updatedAt
+  createdAt    DateTime @default(now())
+
+  user DT_USER @relation(fields: [nik], references: [nik], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([nik, mailboxEmail, messageId, part, via])
+  @@index([nik, mailboxEmail, messageId])
+}
+
+model DT_GOOGLE_CREDENTIAL {
   id                   String    @id @db.VarChar(36)
   nik                  String    @db.Char(8)
   googleEmail          String    @db.NVarChar(255)
   displayName          String?   @db.NVarChar(255)
+  photoUrl             String?   @db.NVarChar(512)
   accessTokenCipher    String    @db.NVarChar(Max)
   accessTokenIv        String    @db.VarChar(64)
   accessTokenTag       String    @db.VarChar(64)
@@ -601,6 +623,7 @@ model DT_GOOGLE_CALENDAR_CREDENTIAL {
 
   @@unique([nik, googleEmail])
   @@index([nik])
+  @@map("DT_GOOGLE_CALENDAR_CREDENTIAL")
 }
 
 model DT_ZIMBRA_GOOGLE_EVENT_SYNC {

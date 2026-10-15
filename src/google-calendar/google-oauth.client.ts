@@ -7,12 +7,39 @@ const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const USERINFO_URL = 'https://www.googleapis.com/oauth2/v3/userinfo';
 const CALENDAR_API = 'https://www.googleapis.com/calendar/v3';
 
-export const GOOGLE_CALENDAR_SCOPES = [
+export const GOOGLE_SCOPES = [
   'openid',
   'email',
   'profile',
   'https://www.googleapis.com/auth/calendar',
+  'https://www.googleapis.com/auth/gmail.modify',
+  'https://www.googleapis.com/auth/drive.file',
 ].join(' ');
+
+/** @deprecated Use GOOGLE_SCOPES */
+export const GOOGLE_CALENDAR_SCOPES = GOOGLE_SCOPES;
+
+export function hasGmailScope(scope: string | null | undefined): boolean {
+  if (!scope) return false;
+  return scope.split(/[\s,]+/).some(
+    (s) =>
+      s.includes('gmail.modify') ||
+      s.includes('gmail.readonly') ||
+      s.endsWith('/gmail'),
+  );
+}
+
+export function hasCalendarScope(scope: string | null | undefined): boolean {
+  if (!scope) return false;
+  return scope.split(/[\s,]+/).some((s) => s.includes('auth/calendar'));
+}
+
+export function hasDriveScope(scope: string | null | undefined): boolean {
+  if (!scope) return false;
+  return scope.split(/[\s,]+/).some(
+    (s) => s.includes('auth/drive.file') || s.includes('auth/drive'),
+  );
+}
 
 export type GoogleTokenResponse = {
   access_token: string;
@@ -26,6 +53,7 @@ export type GoogleTokenResponse = {
 export type GoogleUserInfo = {
   email?: string;
   name?: string;
+  picture?: string;
   sub?: string;
 };
 
@@ -93,7 +121,7 @@ export class GoogleOAuthClient {
       client_id: this.clientId(),
       redirect_uri: this.redirectUri(),
       response_type: 'code',
-      scope: GOOGLE_CALENDAR_SCOPES,
+      scope: GOOGLE_SCOPES,
       access_type: 'offline',
       prompt: 'consent',
       include_granted_scopes: 'true',

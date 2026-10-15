@@ -156,6 +156,7 @@ export class MailboxController {
     @Query('query') query?: string,
     @Query('offset') offset?: string,
     @Query('limit') limit?: string,
+    @Query('pageToken') pageToken?: string,
   ) {
     try {
       const data = await this.mailbox.searchMessages(req.user!.nik, {
@@ -163,6 +164,7 @@ export class MailboxController {
         query,
         offset: offset ? Number(offset) : 0,
         limit: limit ? Number(limit) : 50,
+        pageToken: pageToken?.trim() || undefined,
       });
       return new CommonResponse('Messages', HttpStatus.OK, data);
     } catch (e) {
@@ -265,7 +267,7 @@ export class MailboxController {
           cb(null, `mailbox-up-${Date.now()}-${randomUUID()}${ext}`);
         },
       }),
-      // Dropbox large attachments up to 2GB (Zimbra path still capped in service at 5MB)
+      // Large attachments up to 2GB (Zimbra Dropbox / Gmail Drive thresholds in service)
       limits: { fileSize: 2 * 1024 * 1024 * 1024 },
     }),
   )
@@ -275,6 +277,7 @@ export class MailboxController {
     @UploadedFile() file: Express.Multer.File,
     @Body('expiresAt') expiresAt?: string,
     @Body('password') password?: string,
+    @Body('shareMode') shareMode?: string,
   ) {
     // Refresh / tutup tab / abort XHR → hentikan Dropbox di tengah jalan.
     // Pakai res.close (bukan req.close): req.close sering ikut setelah body multer selesai
@@ -291,6 +294,10 @@ export class MailboxController {
       const data = await this.mailbox.uploadAttachment(req.user!.nik, file, {
         expiresAt,
         password,
+        shareMode:
+          shareMode === 'restricted' || shareMode === 'anyone'
+            ? shareMode
+            : undefined,
         signal: ac.signal,
       });
       settled = true;
@@ -302,6 +309,125 @@ export class MailboxController {
       settled = true;
       res.off('close', onClientGone);
       req.off('aborted', onClientGone);
+    }
+  }
+
+  /** Prefer query `part` — Gmail attachmentId terlalu panjang untuk path segment. */
+  @Post('attachments/:messageId/to-ams-drive')
+  async saveAttachmentToAmsDriveQuery(
+    @Req() req: Request & { user?: AuthUser },
+    @Param('messageId') messageId: string,
+    @Query('part') part: string,
+  ) {
+    try {
+      if (!part?.trim()) throw new BadRequestException('part wajib');
+      const data = await this.mailbox.saveAttachmentToAmsDrive(
+        req.user!.nik,
+        messageId,
+        part,
+      );
+      return new CommonResponse('Saved to AMS Drive', HttpStatus.OK, data);
+    } catch (e) {
+      return handleException(e);
+    }
+  }
+
+  @Post('attachments/:messageId/to-drive')
+  async saveAttachmentToDriveQuery(
+    @Req() req: Request & { user?: AuthUser },
+    @Param('messageId') messageId: string,
+    @Query('part') part: string,
+  ) {
+    try {
+      if (!part?.trim()) throw new BadRequestException('part wajib');
+      const data = await this.mailbox.saveAttachmentToDrive(
+        req.user!.nik,
+        messageId,
+        part,
+      );
+      return new CommonResponse('Saved to Drive', HttpStatus.OK, data);
+    } catch (e) {
+      return handleException(e);
+    }
+  }
+
+  @Post('attachments/:messageId/:part/to-ams-drive')
+  async saveAttachmentToAmsDrive(
+    @Req() req: Request & { user?: AuthUser },
+    @Param('messageId') messageId: string,
+    @Param('part') part: string,
+  ) {
+    try {
+      const data = await this.mailbox.saveAttachmentToAmsDrive(
+        req.user!.nik,
+        messageId,
+        part,
+      );
+      return new CommonResponse('Saved to AMS Drive', HttpStatus.OK, data);
+    } catch (e) {
+      return handleException(e);
+    }
+  }
+
+  /** Alias lama — FE baru memakai to-ams-drive. */
+  @Post('attachments/:messageId/:part/to-dropbox')
+  async saveAttachmentToDropbox(
+    @Req() req: Request & { user?: AuthUser },
+    @Param('messageId') messageId: string,
+    @Param('part') part: string,
+  ) {
+    try {
+      const data = await this.mailbox.saveAttachmentToAmsDrive(
+        req.user!.nik,
+        messageId,
+        part,
+      );
+      return new CommonResponse('Saved to AMS Drive', HttpStatus.OK, data);
+    } catch (e) {
+      return handleException(e);
+    }
+  }
+
+  @Post('attachments/:messageId/:part/to-drive')
+  async saveAttachmentToDrive(
+    @Req() req: Request & { user?: AuthUser },
+    @Param('messageId') messageId: string,
+    @Param('part') part: string,
+  ) {
+    try {
+      const data = await this.mailbox.saveAttachmentToDrive(
+        req.user!.nik,
+        messageId,
+        part,
+      );
+      return new CommonResponse('Saved to Drive', HttpStatus.OK, data);
+    } catch (e) {
+      return handleException(e);
+    }
+  }
+
+  @Get('attachments/:messageId')
+  async downloadQuery(
+    @Req() req: Request & { user?: AuthUser },
+    @Param('messageId') messageId: string,
+    @Query('part') part: string,
+    @Query('download') downloadQuery: string,
+    @Res() res: Response,
+  ) {
+    try {
+      if (!part?.trim()) throw new BadRequestException('part wajib');
+      const file = await this.mailbox.downloadAttachment(req.user!.nik, messageId, part);
+      res.setHeader('Content-Type', file.contentType || 'application/octet-stream');
+      const isInline = file.contentType?.startsWith('image/') || file.contentType?.startsWith('text/');
+      const disposition = downloadQuery === '1' || !isInline ? 'attachment' : 'inline';
+      if (file.filename) {
+        res.setHeader('Content-Disposition', `${disposition}; filename="${encodeURIComponent(file.filename)}"`);
+      } else {
+        res.setHeader('Content-Disposition', disposition);
+      }
+      res.send(file.buffer);
+    } catch (e) {
+      res.status(400).json(handleException(e));
     }
   }
 

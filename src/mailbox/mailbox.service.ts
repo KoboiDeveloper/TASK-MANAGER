@@ -4,17 +4,41 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
+import { mkdir, rename, readFile, unlink, writeFile } from 'fs/promises';
+import { join } from 'path';
+import { tmpdir } from 'os';
 import { PrismaService } from '../prisma/prisma.service';
+import type { GmailAttachmentInput } from './gmail-api.client';
+import {
+  GoogleOAuthClient,
+  hasDriveScope,
+  hasGmailScope,
+} from '../google-calendar/google-oauth.client';
 import { MailboxCryptoService } from './mailbox-crypto.service';
 import { ZimbraSoapClient } from './zimbra-soap.client';
+import { GmailApiClient } from './gmail-api.client';
+import { GmailDriveClient, type DriveShareMode } from './gmail-drive.client';
 import { DropboxStorageService } from '../storage/dropbox.storage.service';
+import { DriveService } from '../cloud/drive/drive.service';
+import { CloudPrismaService } from '../cloud/prisma/prisma.service';
 import { ConnectMailboxDto, MessageActionDto, SendMessageDto } from './dto/mailbox.dto';
 import { DROPBOX_GLYPH_CID, DROPBOX_GLYPH_PNG } from './dropbox-glyph';
 import {
   normalizeMailboxEmail,
   pickActiveAfterDisconnect,
+  type MailboxProvider,
 } from './mailbox-active.util';
+
+/** DT_USER.activeZimbraEmail stores the active mailbox email for ANY provider (zimbra|gmail). */
+type MergedMailboxAccount = {
+  email: string;
+  name: string | null;
+  photoUrl?: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+  provider: MailboxProvider;
+};
 
 export type FolderNode = {
   id: string;
@@ -65,14 +89,120 @@ export type MessageSummary = {
 export class MailboxService {
   private readonly logger = new Logger(MailboxService.name);
 
+  /** Staged Gmail uploads (aid → disk path). Cleared after send. */
+  private readonly gmailStaged = new Map<
+    string,
+    {
+      nik: string;
+      path: string;
+      filename: string;
+      contentType: string;
+      size: number;
+    }
+  >();
+
+  static readonly GMAIL_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly crypto: MailboxCryptoService,
     private readonly zimbra: ZimbraSoapClient,
+    private readonly gmail: GmailApiClient,
+    private readonly gmailDrive: GmailDriveClient,
+    private readonly oauth: GoogleOAuthClient,
     private readonly dropbox: DropboxStorageService,
+    private readonly amsDrive: DriveService,
+    private readonly cloudPrisma: CloudPrismaService,
   ) {}
 
   async getStatus(nik: string) {
+    const merged = await this.listMergedAccounts(nik);
+    const user = await this.prisma.dT_USER.findUnique({
+      where: { nik },
+      // activeZimbraEmail = active mailbox email (zimbra or gmail)
+      select: { activeZimbraEmail: true },
+    });
+    const accounts = merged.map((r) => ({
+      email: r.email,
+      name: r.name,
+      photoUrl: r.photoUrl ?? null,
+      provider: r.provider,
+      createdAt: r.createdAt.toISOString(),
+      updatedAt: r.updatedAt.toISOString(),
+    }));
+    let activeEmail = user?.activeZimbraEmail ?? null;
+    if (activeEmail && !accounts.some((a) => a.email === activeEmail)) {
+      activeEmail = pickActiveAfterDisconnect(
+        merged.map((r) => ({
+          email: r.email,
+          createdAt: r.createdAt,
+          provider: r.provider,
+        })),
+      );
+      await this.prisma.dT_USER.update({
+        where: { nik },
+        data: { activeZimbraEmail: activeEmail },
+      });
+    }
+    if (!activeEmail && accounts.length) {
+      activeEmail = accounts[0].email; // newest (merged sorted desc)
+      await this.prisma.dT_USER.update({
+        where: { nik },
+        data: { activeZimbraEmail: activeEmail },
+      });
+    }
+    return {
+      connected: accounts.length > 0,
+      activeEmail,
+      email: activeEmail, // compat
+      accounts,
+      updatedAt: accounts[0]?.updatedAt ?? null,
+    };
+  }
+
+  /**
+   * Active mailbox ownership → provider + email.
+   * Throws if no Zimbra/Gmail mailbox is connected.
+   */
+  async resolveMailboxContext(
+    nik: string,
+  ): Promise<{ provider: MailboxProvider; email: string }> {
+    const merged = await this.listMergedAccounts(nik);
+    if (!merged.length) {
+      throw new BadRequestException(
+        'Mailbox belum terhubung. Hubungkan akun Zimbra atau Google (Gmail) dulu.',
+      );
+    }
+    const user = await this.prisma.dT_USER.findUnique({
+      where: { nik },
+      select: { activeZimbraEmail: true },
+    });
+    let activeEmail = user?.activeZimbraEmail ?? null;
+    if (!activeEmail || !merged.some((a) => a.email === activeEmail)) {
+      activeEmail = pickActiveAfterDisconnect(
+        merged.map((r) => ({
+          email: r.email,
+          createdAt: r.createdAt,
+          provider: r.provider,
+        })),
+      );
+      if (activeEmail) {
+        await this.prisma.dT_USER.update({
+          where: { nik },
+          data: { activeZimbraEmail: activeEmail },
+        });
+      }
+    }
+    const acc = merged.find((a) => a.email === activeEmail);
+    if (!acc || !activeEmail) {
+      throw new BadRequestException(
+        'Mailbox belum terhubung. Hubungkan akun Zimbra atau Google (Gmail) dulu.',
+      );
+    }
+    return { provider: acc.provider, email: acc.email };
+  }
+
+  private async listMergedAccounts(nik: string): Promise<MergedMailboxAccount[]> {
     const rows = await this.prisma.dT_MAILBOX_CREDENTIAL.findMany({
       where: { nik },
       orderBy: { createdAt: 'desc' },
@@ -109,40 +239,63 @@ export class MailboxService {
       }
     }
 
-    const user = await this.prisma.dT_USER.findUnique({
-      where: { nik },
-      select: { activeZimbraEmail: true },
-    });
-    const accounts = rows.map((r) => ({
+    const zimbraAccounts: MergedMailboxAccount[] = rows.map((r) => ({
       email: r.zimbraEmail,
       name: (r.displayName || '').trim() || null,
-      createdAt: r.createdAt.toISOString(),
-      updatedAt: r.updatedAt.toISOString(),
+      photoUrl: null,
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+      provider: 'zimbra' as const,
     }));
-    let activeEmail = user?.activeZimbraEmail ?? null;
-    if (activeEmail && !accounts.some((a) => a.email === activeEmail)) {
-      activeEmail = pickActiveAfterDisconnect(
-        rows.map((r) => ({ zimbraEmail: r.zimbraEmail, createdAt: r.createdAt })),
-      );
-      await this.prisma.dT_USER.update({
-        where: { nik },
-        data: { activeZimbraEmail: activeEmail },
+
+    const googleRows = await this.prisma.dT_GOOGLE_CREDENTIAL.findMany({
+      where: { nik },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        googleEmail: true,
+        displayName: true,
+        photoUrl: true,
+        createdAt: true,
+        updatedAt: true,
+        scope: true,
+      },
+    });
+
+    const gmailAccounts: MergedMailboxAccount[] = [];
+    for (const r of googleRows) {
+      if (!hasGmailScope(r.scope)) continue;
+      let photoUrl = (r.photoUrl || '').trim() || null;
+      // Backfill foto Google sekali jika belum tersimpan (reconnect lama)
+      if (!photoUrl) {
+        try {
+          const token = await this.getGoogleAccessToken(nik, r.googleEmail);
+          const info = await this.oauth.getUserInfo(token);
+          photoUrl = (info.picture || '').trim() || null;
+          if (photoUrl) {
+            await this.prisma.dT_GOOGLE_CREDENTIAL.update({
+              where: {
+                nik_googleEmail: { nik, googleEmail: r.googleEmail },
+              },
+              data: { photoUrl },
+            });
+          }
+        } catch {
+          /* best-effort */
+        }
+      }
+      gmailAccounts.push({
+        email: r.googleEmail,
+        name: (r.displayName || '').trim() || null,
+        photoUrl,
+        createdAt: r.createdAt,
+        updatedAt: r.updatedAt,
+        provider: 'gmail' as const,
       });
     }
-    if (!activeEmail && accounts.length) {
-      activeEmail = accounts[0].email; // newest (query desc)
-      await this.prisma.dT_USER.update({
-        where: { nik },
-        data: { activeZimbraEmail: activeEmail },
-      });
-    }
-    return {
-      connected: accounts.length > 0,
-      activeEmail,
-      email: activeEmail, // compat
-      accounts,
-      updatedAt: accounts[0]?.updatedAt ?? null,
-    };
+
+    return [...zimbraAccounts, ...gmailAccounts].sort(
+      (a, b) => b.createdAt.getTime() - a.createdAt.getTime(),
+    );
   }
 
   async connect(nik: string, dto: ConnectMailboxDto) {
@@ -185,6 +338,17 @@ export class MailboxService {
 
   async disconnect(nik: string, email: string) {
     const normalized = normalizeMailboxEmail(email);
+    const merged = await this.listMergedAccounts(nik);
+    const target = merged.find((a) => a.email === normalized);
+    if (!target) {
+      throw new BadRequestException('Akun tidak ditemukan');
+    }
+    if (target.provider === 'gmail') {
+      throw new BadRequestException(
+        'Lepas akun Google dari Pengaturan → Google (Calendar & Gmail)',
+      );
+    }
+
     const deleted = await this.prisma.dT_MAILBOX_CREDENTIAL.deleteMany({
       where: { nik, zimbraEmail: normalized },
     });
@@ -198,11 +362,14 @@ export class MailboxService {
     });
     const active = user?.activeZimbraEmail ?? null;
     if (!active || normalizeMailboxEmail(active) === normalized) {
-      const remaining = await this.prisma.dT_MAILBOX_CREDENTIAL.findMany({
-        where: { nik },
-        select: { zimbraEmail: true, createdAt: true },
-      });
-      const nextActive = pickActiveAfterDisconnect(remaining);
+      const remaining = await this.listMergedAccounts(nik);
+      const nextActive = pickActiveAfterDisconnect(
+        remaining.map((r) => ({
+          email: r.email,
+          createdAt: r.createdAt,
+          provider: r.provider,
+        })),
+      );
       await this.prisma.dT_USER.update({
         where: { nik },
         data: { activeZimbraEmail: nextActive },
@@ -214,10 +381,9 @@ export class MailboxService {
 
   async setActive(nik: string, email: string) {
     const normalized = normalizeMailboxEmail(email);
-    const cred = await this.prisma.dT_MAILBOX_CREDENTIAL.findUnique({
-      where: { nik_zimbraEmail: { nik, zimbraEmail: normalized } },
-    });
-    if (!cred) {
+    const merged = await this.listMergedAccounts(nik);
+    const found = merged.find((a) => a.email === normalized);
+    if (!found) {
       throw new BadRequestException('Akun tidak ditemukan');
     }
     await this.prisma.dT_USER.update({
@@ -228,6 +394,11 @@ export class MailboxService {
   }
 
   async getFolders(nik: string): Promise<FolderNode[]> {
+    const ctx = await this.resolveMailboxContext(nik);
+    if (ctx.provider === 'gmail') {
+      const token = await this.getGoogleAccessToken(nik, ctx.email);
+      return this.gmail.listFolders(token);
+    }
     const body = await this.withAuth(nik, (token) =>
       this.zimbra.call(token, {
         GetFolderRequest: {
@@ -241,6 +412,9 @@ export class MailboxService {
   }
 
   async getCalendars(nik: string): Promise<FolderNode[]> {
+    const ctx = await this.resolveMailboxContext(nik);
+    // Mailbox calendars are Zimbra-only; Google calendars live in GoogleCalendarService
+    if (ctx.provider === 'gmail') return [];
     const body = await this.withAuth(nik, (token) =>
       this.zimbra.call(token, {
         GetFolderRequest: {
@@ -274,6 +448,15 @@ export class MailboxService {
     if (!title) throw new BadRequestException('Judul wajib');
     if (!Number.isFinite(input.start) || !Number.isFinite(input.end) || input.end <= input.start) {
       throw new BadRequestException('Range waktu tidak valid');
+    }
+
+    if (!input.email) {
+      const ctx = await this.resolveMailboxContext(nik);
+      if (ctx.provider === 'gmail') {
+        throw new BadRequestException(
+          'Buat event Google lewat Kalender Google, bukan mailbox Zimbra',
+        );
+      }
     }
 
     const cred = await this.resolveCredential(nik, input.email);
@@ -401,6 +584,11 @@ export class MailboxService {
       throw new BadRequestException('Rentang events maksimal 800 hari');
     }
 
+    if (!opts.email) {
+      const ctx = await this.resolveMailboxContext(nik);
+      if (ctx.provider === 'gmail') return [];
+    }
+
     const chunks: CalendarEvent[] = [];
     let cursor = start;
     while (cursor < end) {
@@ -454,10 +642,38 @@ export class MailboxService {
 
   async searchMessages(
     nik: string,
-    opts: { folderId?: string; query?: string; offset?: number; limit?: number },
-  ): Promise<{ messages: MessageSummary[]; more: boolean; offset: number }> {
+    opts: {
+      folderId?: string;
+      query?: string;
+      offset?: number;
+      limit?: number;
+      pageToken?: string;
+    },
+  ): Promise<{
+    messages: MessageSummary[];
+    more: boolean;
+    offset: number;
+    nextPageToken?: string;
+  }> {
     const limit = Math.min(Math.max(opts.limit ?? 50, 1), 100);
     const offset = Math.max(opts.offset ?? 0, 0);
+    const ctx = await this.resolveMailboxContext(nik);
+    if (ctx.provider === 'gmail') {
+      const token = await this.getGoogleAccessToken(nik, ctx.email);
+      const res = await this.gmail.listMessages(token, {
+        labelIds: opts.folderId ? [opts.folderId] : undefined,
+        q: opts.query?.trim() || undefined,
+        maxResults: limit,
+        pageToken: opts.pageToken,
+      });
+      return {
+        messages: res.messages,
+        more: res.more,
+        offset,
+        nextPageToken: res.nextPageToken,
+      };
+    }
+
     const parts: string[] = [];
     if (opts.folderId) parts.push(`inid:${opts.folderId}`);
     if (opts.query?.trim()) parts.push(opts.query.trim());
@@ -488,24 +704,236 @@ export class MailboxService {
   }
 
   async getMessage(nik: string, id: string) {
-    const body = await this.withAuth(nik, (token) =>
-      this.zimbra.call(token, {
-        GetMsgRequest: {
-          _jsns: 'urn:zimbraMail',
-          m: { id, html: 1, needExp: 1, max: 250000 },
-        },
-      }),
+    const ctx = await this.resolveMailboxContext(nik);
+    let detail: any;
+    if (ctx.provider === 'gmail') {
+      const token = await this.getGoogleAccessToken(nik, ctx.email);
+      detail = await this.gmail.getMessage(token, id);
+    } else {
+      const body = await this.withAuth(nik, (token) =>
+        this.zimbra.call(token, {
+          GetMsgRequest: {
+            _jsns: 'urn:zimbraMail',
+            m: { id, html: 1, needExp: 1, max: 250000 },
+          },
+        }),
+      );
+      const msg = this.asArray(
+        (body as { GetMsgResponse?: { m?: unknown } }).GetMsgResponse?.m,
+      )[0];
+      if (!msg) throw new NotFoundException('Pesan tidak ditemukan');
+      detail = this.mapMessageDetail(msg);
+    }
+    const savedAttachments = this.remapSavedAttachmentParts(
+      detail?.attachments,
+      await this.listSavedAttachments(nik, ctx.email, id),
     );
-    const msg = this.asArray(
-      (body as { GetMsgResponse?: { m?: unknown } }).GetMsgResponse?.m,
-    )[0];
-    if (!msg) throw new NotFoundException('Pesan tidak ditemukan');
-    return this.mapMessageDetail(msg);
+    return { ...detail, savedAttachments };
+  }
+
+  /** Gmail attachmentId bisa >> 64 char — simpan hash, FE tetap dapat part asli. */
+  private partStorageKey(part: string): string {
+    const p = String(part || '');
+    if (p.length <= 64) return p;
+    return createHash('sha256').update(p).digest('hex');
+  }
+
+  private clipStr(value: string | null | undefined, max: number): string | null {
+    if (value == null) return null;
+    const s = String(value);
+    return s.length <= max ? s : s.slice(0, max);
+  }
+
+  /** Jangan pakai Gmail attachmentId sebagai nama file di Drive. */
+  private safeCloudFilename(
+    raw: string | null | undefined,
+    part: string,
+    mime?: string | null,
+  ): string {
+    let name = String(raw || '').trim();
+    if (name === 'undefined') name = '';
+    // attachmentId / content-id-ish: panjang & hampir tanpa spasi/dot bermakna
+    const looksLikeId =
+      !name ||
+      name.length > 120 ||
+      (name.length > 64 && !/\.[A-Za-z0-9]{1,8}$/.test(name) && !/\s/.test(name));
+    if (looksLikeId) {
+      const short = createHash('sha256').update(String(part)).digest('hex').slice(0, 8);
+      const extFromMime = (() => {
+        const m = String(mime || '').toLowerCase();
+        if (m.includes('png')) return '.png';
+        if (m.includes('jpeg') || m.includes('jpg')) return '.jpg';
+        if (m.includes('gif')) return '.gif';
+        if (m.includes('webp')) return '.webp';
+        if (m.includes('pdf')) return '.pdf';
+        if (m.includes('zip')) return '.zip';
+        if (m.includes('msword') || m.includes('wordprocessingml')) return '.docx';
+        if (m.includes('sheet') || m.includes('excel')) return '.xlsx';
+        return '';
+      })();
+      name = `attachment-${short}${extFromMime}`;
+    }
+    const safe = name.replace(/[^\w.\- ()[\]]+/g, '_').replace(/_+/g, '_').trim() || 'attachment';
+    if (safe.length <= 180) return safe;
+    const dot = safe.lastIndexOf('.');
+    const ext = dot > 0 && safe.length - dot <= 12 ? safe.slice(dot) : '';
+    return `${safe.slice(0, 180 - ext.length)}${ext}`;
+  }
+
+  private remapSavedAttachmentParts(
+    attachments:
+      | Array<{ part?: string; filename?: string }>
+      | undefined,
+    saved: Array<{
+      part: string;
+      via: 'gdrive' | 'amsdrive';
+      url: string;
+      fileId: string | null;
+      filename: string | null;
+    }>,
+  ) {
+    const list = attachments || [];
+    const keyToOriginal = new Map<string, string>();
+    const filenameToPart = new Map<string, string>();
+    for (const a of list) {
+      const original = String(a.part || '');
+      if (!original) continue;
+      keyToOriginal.set(this.partStorageKey(original), original);
+      keyToOriginal.set(original, original);
+      const fn = String(a.filename || '')
+        .trim()
+        .toLowerCase();
+      if (fn) filenameToPart.set(fn, original);
+    }
+    return saved.map((row) => {
+      let part = keyToOriginal.get(row.part) || '';
+      if (!part && row.filename) {
+        part = filenameToPart.get(String(row.filename).trim().toLowerCase()) || '';
+      }
+      // attachmentId Gmail bisa beda tiap fetch / terpotong di URL — 1 lampiran → ikat langsung
+      if (!part && list.length === 1 && list[0]?.part) {
+        part = String(list[0].part);
+      }
+      return { ...row, part: part || row.part };
+    });
+  }
+
+  /** Samakan part request dengan part yang diekspos getMessage (partId / filename / sole). */
+  private canonicalAttachmentPart(
+    attachments: Array<{ part?: string; filename?: string }> | undefined,
+    requestedPart: string,
+    filename?: string | null,
+  ): string {
+    const list = attachments || [];
+    const req = String(requestedPart || '');
+    if (list.some((a) => String(a.part) === req)) return req;
+    const fn = String(filename || '')
+      .trim()
+      .toLowerCase();
+    if (fn) {
+      const byName = list.find(
+        (a) =>
+          String(a.filename || '')
+            .trim()
+            .toLowerCase() === fn,
+      );
+      if (byName?.part) return String(byName.part);
+    }
+    if (list.length === 1 && list[0]?.part) return String(list[0].part);
+    return req;
+  }
+
+  private async listSavedAttachments(
+    nik: string,
+    mailboxEmail: string,
+    messageId: string,
+  ) {
+    const rows = await this.prisma.dT_MAILBOX_SAVED_ATTACHMENT.findMany({
+      where: {
+        nik: nik.trim(),
+        mailboxEmail: (this.clipStr(mailboxEmail.trim().toLowerCase(), 255) || '').trim(),
+        messageId: this.clipStr(String(messageId), 255) || String(messageId),
+      },
+      select: {
+        part: true,
+        via: true,
+        url: true,
+        fileId: true,
+        filename: true,
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+    return rows.map((r) => ({
+      part: r.part,
+      via: r.via as 'gdrive' | 'amsdrive',
+      url: r.url,
+      fileId: r.fileId,
+      filename: r.filename,
+    }));
+  }
+
+  private async recordSavedAttachment(input: {
+    nik: string;
+    mailboxEmail: string;
+    messageId: string;
+    part: string;
+    via: 'gdrive' | 'amsdrive';
+    url: string;
+    fileId?: string | null;
+    filename?: string | null;
+  }) {
+    const nik = input.nik.trim();
+    const mailboxEmail = (this.clipStr(input.mailboxEmail.trim().toLowerCase(), 255) || '').trim();
+    const messageId = this.clipStr(String(input.messageId), 255) || '';
+    const part = this.partStorageKey(input.part);
+    const via = input.via;
+    const url = this.clipStr(input.url, 1000) || '';
+    const fileId = this.clipStr(input.fileId || null, 255);
+    const filename = this.clipStr(input.filename || null, 500);
+    if (!mailboxEmail || !messageId || !part || !url) {
+      throw new BadRequestException('Gagal menyimpan status lampiran cloud');
+    }
+    await this.prisma.dT_MAILBOX_SAVED_ATTACHMENT.upsert({
+      where: {
+        nik_mailboxEmail_messageId_part_via: {
+          nik,
+          mailboxEmail,
+          messageId,
+          part,
+          via,
+        },
+      },
+      create: {
+        id: randomUUID(),
+        nik,
+        mailboxEmail,
+        messageId,
+        part,
+        via,
+        url,
+        fileId,
+        filename,
+      },
+      update: {
+        url,
+        fileId,
+        filename,
+      },
+    });
   }
 
   async sendMessage(nik: string, dto: SendMessageDto) {
     if (!this.splitAddrs(dto.to || '').length) {
       throw new BadRequestException('Tambahkan minimal satu penerima');
+    }
+    const ctx = await this.resolveMailboxContext(nik);
+    if (ctx.provider === 'gmail') {
+      const token = await this.getGoogleAccessToken(nik, ctx.email);
+      const attachments = await this.resolveGmailAttachments(nik, token, dto);
+      await this.grantGdriveRecipients(token, dto);
+      const result = await this.gmail.sendMessage(token, dto, attachments);
+      this.releaseGmailStagedAids(dto.attachmentAids);
+      return result;
     }
     const body = await this.withAuth(nik, async (token) => {
       const prepared = await this.attachDropboxGlyph(token, dto);
@@ -528,6 +956,12 @@ export class MailboxService {
   }
 
   async saveDraft(nik: string, dto: SendMessageDto) {
+    const ctx = await this.resolveMailboxContext(nik);
+    if (ctx.provider === 'gmail') {
+      const token = await this.getGoogleAccessToken(nik, ctx.email);
+      const attachments = await this.resolveGmailAttachments(nik, token, dto);
+      return this.gmail.saveDraft(token, dto, attachments);
+    }
     const body = await this.withAuth(nik, async (token) => {
       const prepared = await this.attachDropboxGlyph(token, dto);
       const e = this.buildMimeEmail(prepared.dto);
@@ -548,6 +982,95 @@ export class MailboxService {
       (body as { SaveDraftResponse?: { m?: unknown } }).SaveDraftResponse?.m,
     )[0] as { id?: string } | undefined;
     return { ok: true, id: draft?.id || null };
+  }
+
+  private async resolveGmailAttachments(
+    nik: string,
+    accessToken: string,
+    dto: SendMessageDto,
+  ): Promise<GmailAttachmentInput[]> {
+    const out: GmailAttachmentInput[] = [];
+    const aids = (dto.attachmentAids || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    for (const aid of aids) {
+      const staged = this.gmailStaged.get(aid);
+      if (!staged || staged.nik !== nik.trim()) {
+        throw new BadRequestException(`Lampiran Gmail tidak ditemukan: ${aid}`);
+      }
+      const buf = await readFile(staged.path);
+      out.push({
+        filename: staged.filename,
+        contentType: staged.contentType,
+        contentBase64: buf.toString('base64'),
+      });
+    }
+
+    const parts = (dto.attachmentParts || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const sourceId = (dto.draftId || dto.inReplyTo || '').trim();
+    if (parts.length && !sourceId) {
+      throw new BadRequestException(
+        'Lampiran draf Gmail membutuhkan draftId atau inReplyTo',
+      );
+    }
+    for (const part of parts) {
+      const file = await this.gmail.downloadAttachment(accessToken, sourceId, part);
+      out.push({
+        filename: this.safeCloudFilename(undefined, part, 'application/octet-stream'),
+        contentType: 'application/octet-stream',
+        contentBase64: file.data.toString('base64'),
+      });
+    }
+
+    const total = out.reduce(
+      (n, a) => n + Buffer.from(a.contentBase64, 'base64').length,
+      0,
+    );
+    if (total > MailboxService.GMAIL_MAX_ATTACHMENT_BYTES) {
+      throw new BadRequestException(
+        'Total lampiran Gmail maksimal 25 MB (batas pesan Gmail)',
+      );
+    }
+    return out;
+  }
+
+  private async grantGdriveRecipients(accessToken: string, dto: SendMessageDto) {
+    const raw = (dto.gdriveShares || '').trim();
+    if (!raw) return;
+    let shares: Array<{ fileId?: string; shareMode?: string }> = [];
+    try {
+      shares = JSON.parse(raw);
+    } catch {
+      throw new BadRequestException('gdriveShares JSON tidak valid');
+    }
+    if (!Array.isArray(shares) || !shares.length) return;
+    const emails = [
+      ...this.splitAddrs(dto.to || ''),
+      ...this.splitAddrs(dto.cc || ''),
+      ...this.splitAddrs(dto.bcc || ''),
+    ];
+    for (const s of shares) {
+      if (!s?.fileId) continue;
+      if (String(s.shareMode || '') !== 'restricted') continue;
+      await this.gmailDrive.grantReaders(accessToken, String(s.fileId), emails);
+    }
+  }
+
+  private releaseGmailStagedAids(attachmentAids?: string) {
+    const aids = (attachmentAids || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    for (const aid of aids) {
+      const staged = this.gmailStaged.get(aid);
+      if (!staged) continue;
+      this.gmailStaged.delete(aid);
+      void unlink(staged.path).catch(() => undefined);
+    }
   }
 
   /**
@@ -606,6 +1129,11 @@ export class MailboxService {
   }
 
   async messageAction(nik: string, id: string, dto: MessageActionDto) {
+    const ctx = await this.resolveMailboxContext(nik);
+    if (ctx.provider === 'gmail') {
+      const token = await this.getGoogleAccessToken(nik, ctx.email);
+      return this.gmail.messageAction(token, id, dto);
+    }
     const OPS: Record<string, string> = {
       read: 'read',
       unread: '!read',
@@ -640,6 +1168,11 @@ export class MailboxService {
   }
 
   async getTags(nik: string) {
+    const ctx = await this.resolveMailboxContext(nik);
+    if (ctx.provider === 'gmail') {
+      const token = await this.getGoogleAccessToken(nik, ctx.email);
+      return this.gmail.listTags(token);
+    }
     const body = await this.withAuth(nik, (token) =>
       this.zimbra.call(token, {
         GetTagRequest: { _jsns: 'urn:zimbraMail' },
@@ -659,6 +1192,26 @@ export class MailboxService {
    * Dipakai compose: Zimbra dulu; FE boleh fallback custom lokal jika kosong.
    */
   async getSignatures(nik: string) {
+    const ctx = await this.resolveMailboxContext(nik);
+    if (ctx.provider === 'gmail') {
+      const token = await this.getGoogleAccessToken(nik, ctx.email);
+      const res = await this.gmail.listSignatures(token);
+      const defaultSig =
+        res.signatures.find((s) => s.id && s.id === res.defaultId) ||
+        res.signatures.find((s) => s.html.trim()) ||
+        res.signatures[0] ||
+        null;
+      return {
+        defaultId: defaultSig?.id || res.defaultId,
+        defaultHtml: defaultSig?.html || '',
+        signatures: res.signatures.map((s) => ({
+          id: s.id,
+          name: s.name,
+          html: s.html,
+          text: this.stripHtml(s.html),
+        })),
+      };
+    }
     const { signatures, defaultId } = await this.withAuth(nik, async (token) => {
       const [sigBody, prefsBody] = await Promise.all([
         this.zimbra.call(token, {
@@ -710,6 +1263,12 @@ export class MailboxService {
     nik: string,
     dto: { id?: string; name?: string; html: string },
   ) {
+    const ctx = await this.resolveMailboxContext(nik);
+    if (ctx.provider === 'gmail') {
+      throw new BadRequestException(
+        'Ubah signature Gmail di pengaturan Gmail / Google Account',
+      );
+    }
     const html = (dto.html || '').trim();
     const name = (dto.name || 'Signature').trim() || 'Signature';
 
@@ -797,6 +1356,9 @@ export class MailboxService {
   async autocomplete(nik: string, q: string) {
     const name = (q || '').trim();
     if (name.length < 1) return [];
+    const ctx = await this.resolveMailboxContext(nik);
+    if (ctx.provider === 'gmail') return [];
+
     const seen = new Set<string>();
     const out: Array<{ email: string; name: string; type: string }> = [];
 
@@ -890,81 +1452,162 @@ export class MailboxService {
   }
 
   /** Di atas threshold → Dropbox shared link (bukan attachment Zimbra). */
-  static readonly DROPBOX_THRESHOLD_BYTES = 5 * 1024 * 1024;
+  static readonly AMS_DRIVE_THRESHOLD_BYTES = 3 * 1024 * 1024;
+  /** @deprecated alias — pakai AMS_DRIVE_THRESHOLD_BYTES */
+  static readonly DROPBOX_THRESHOLD_BYTES = 3 * 1024 * 1024;
   /** Max via Dropbox (Zimbra tetap hanya file ≤ threshold). */
   static readonly MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024 * 1024;
 
   async uploadAttachment(
     nik: string,
     file: Express.Multer.File,
-    options?: { expiresAt?: string; password?: string; signal?: AbortSignal },
+    options?: {
+      expiresAt?: string;
+      password?: string;
+      shareMode?: DriveShareMode;
+      signal?: AbortSignal;
+    },
   ) {
     if (!file) throw new BadRequestException('File wajib');
-    if (file.size > MailboxService.MAX_ATTACHMENT_BYTES) {
-      throw new BadRequestException('Lampiran maksimal 2GB');
-    }
     this.throwIfUploadAborted(options?.signal);
 
     const filename = file.originalname || 'file';
+    const ctx = await this.resolveMailboxContext(nik);
 
-    try {
-      if (file.size > MailboxService.DROPBOX_THRESHOLD_BYTES) {
-        const password = options?.password?.trim() || undefined;
-        if (password && password.length < 4) {
-          throw new BadRequestException('Password file minimal 4 karakter');
+    // Gmail: ≤25MB inline; >25MB → Drive (never Dropbox)
+    if (ctx.provider === 'gmail') {
+      if (file.size > MailboxService.MAX_ATTACHMENT_BYTES) {
+        throw new BadRequestException('Lampiran maksimal 2GB');
+      }
+      const mime = file.mimetype || 'application/octet-stream';
+
+      if (file.size > MailboxService.GMAIL_MAX_ATTACHMENT_BYTES) {
+        const shareMode: DriveShareMode =
+          options?.shareMode === 'restricted' ? 'restricted' : 'anyone';
+        try {
+          this.throwIfUploadAborted(options?.signal);
+          const token = await this.getGoogleAccessToken(nik, ctx.email);
+          const uploaded = await this.gmailDrive.uploadAndShare(token, {
+            filename,
+            mimeType: mime,
+            size: file.size,
+            path: file.path,
+            buffer: file.path ? undefined : await this.readUploadBuffer(file),
+            shareMode,
+            signal: options?.signal,
+          });
+          return {
+            via: 'gdrive' as const,
+            url: uploaded.url,
+            fileId: uploaded.fileId,
+            shareMode: uploaded.shareMode,
+            filename,
+            size: file.size,
+            expiresAt: null,
+            passwordProtected: false,
+          };
+        } finally {
+          await this.cleanupUploadTemp(file);
         }
+      }
 
-        let expiresAt: Date | undefined;
-        if (options?.expiresAt) {
-          const d = new Date(options.expiresAt);
-          if (Number.isNaN(d.getTime())) {
-            throw new BadRequestException('Tanggal kadaluarsa tidak valid');
-          }
-          if (d.getTime() <= Date.now() + 5 * 60_000) {
-            throw new BadRequestException('Kadaluarsa harus lebih dari 5 menit dari sekarang');
-          }
-          const max = Date.now() + 366 * 24 * 60 * 60_000;
-          if (d.getTime() > max) {
-            throw new BadRequestException('Kadaluarsa maksimal 1 tahun');
-          }
-          expiresAt = d;
+      try {
+        this.throwIfUploadAborted(options?.signal);
+        const aid = `gma-${randomUUID()}`;
+        const dir = join(tmpdir(), 'mailbox-gmail-att', nik.trim());
+        await mkdir(dir, { recursive: true });
+        const dest = join(dir, aid);
+        if (file.path) {
+          await rename(file.path, dest);
+          (file as { path?: string }).path = undefined;
+        } else {
+          await writeFile(dest, await this.readUploadBuffer(file));
         }
-
-        this.throwIfUploadAborted(options?.signal);
-
-        const safeName = filename.replace(/[^\w.\- ()[\]]+/g, '_').slice(0, 180);
-        const path = `mailbox/${nik.trim()}/${Date.now()}-${randomUUID().slice(0, 8)}-${safeName}`;
-        const mime = file.mimetype || 'application/octet-stream';
-
-        const uploaded = file.path
-          ? await this.dropbox.uploadLocalFileWithShareOptions(
-              path,
-              file.path,
-              file.size,
-              mime,
-              { expiresAt, password, signal: options?.signal },
-            )
-          : await this.dropbox.uploadFileWithShareOptions(
-              path,
-              await this.readUploadBuffer(file),
-              mime,
-              { expiresAt, password, signal: options?.signal },
-            );
-
-        this.throwIfUploadAborted(options?.signal);
-
-        const url = uploaded.passwordProtected
-          ? uploaded.url
-          : this.toDropboxDownloadUrl(uploaded.url);
-
+        this.gmailStaged.set(aid, {
+          nik: nik.trim(),
+          path: dest,
+          filename,
+          contentType: mime,
+          size: file.size,
+        });
         return {
-          via: 'dropbox' as const,
-          url,
+          via: 'gmail' as const,
+          aid,
           filename,
           size: file.size,
-          expiresAt: uploaded.expiresAt ?? expiresAt?.toISOString() ?? null,
-          passwordProtected: uploaded.passwordProtected,
+          expiresAt: null,
+          passwordProtected: false,
         };
+      } finally {
+        await this.cleanupUploadTemp(file);
+      }
+    }
+
+    if (file.size > MailboxService.MAX_ATTACHMENT_BYTES) {
+      throw new BadRequestException('Lampiran maksimal 2GB');
+    }
+
+    try {
+      if (file.size > MailboxService.AMS_DRIVE_THRESHOLD_BYTES) {
+        const cloudUser = await this.cloudPrisma.dT_USER.findUnique({
+          where: { nik: nik.trim() },
+          select: { nik: true, statusActive: true },
+        });
+        if (!cloudUser?.statusActive) {
+          throw new BadRequestException(
+            'Hubungkan AMS Drive dulu (menu Cloud) untuk mengirim lampiran besar',
+          );
+        }
+
+        this.throwIfUploadAborted(options?.signal);
+
+        try {
+          const uploaded = await this.amsDrive.uploadFile(
+            nik,
+            file,
+            undefined,
+            file.path || undefined,
+          );
+          // DriveService sudah unlink localPath
+          if (file.path) (file as { path?: string }).path = undefined;
+
+          this.throwIfUploadAborted(options?.signal);
+
+          const url = (uploaded.url as string) || '';
+          if (!url) {
+            throw new BadRequestException('Gagal membuat tautan AMS Drive');
+          }
+
+          return {
+            via: 'amsdrive' as const,
+            url,
+            fileId: uploaded.id as string,
+            filename: (uploaded.name as string) || filename,
+            size: file.size,
+            expiresAt: null,
+            passwordProtected: false,
+          };
+        } catch (err: any) {
+          const msg = String(err?.message || err || '');
+          if (
+            err instanceof BadRequestException ||
+            /Hubungkan AMS Drive/i.test(msg)
+          ) {
+            throw err;
+          }
+          if (
+            /Foreign key|P2003|ownerNik|User not found|Record to create/i.test(msg) ||
+            err?.code === 'P2003'
+          ) {
+            throw new BadRequestException(
+              'Hubungkan AMS Drive dulu (menu Cloud) untuk mengirim lampiran besar',
+            );
+          }
+          if (/quota exceeded/i.test(msg)) {
+            throw new BadRequestException('Kuota AMS Drive penuh');
+          }
+          throw err;
+        }
       }
 
       this.throwIfUploadAborted(options?.signal);
@@ -1025,8 +1668,246 @@ export class MailboxService {
   }
 
   async downloadAttachment(nik: string, messageId: string, part: string) {
+    const ctx = await this.resolveMailboxContext(nik);
+    if (ctx.provider === 'gmail') {
+      const token = await this.getGoogleAccessToken(nik, ctx.email);
+      // Gmail: `part` is the attachmentId from message detail
+      const file = await this.gmail.downloadAttachment(token, messageId, part);
+      return {
+        buffer: file.data,
+        contentType: 'application/octet-stream',
+        filename: undefined as string | undefined,
+      };
+    }
     const path = `/service/home/~/?auth=co&id=${encodeURIComponent(messageId)}&part=${encodeURIComponent(part)}`;
     return this.withAuth(nik, (token) => this.zimbra.downloadContent(token, path));
+  }
+
+  /**
+   * Salin lampiran pesan ke Google Drive milik user (My Drive).
+   * Butuh credential Google dengan scope drive.file.
+   */
+  async saveAttachmentToDrive(nik: string, messageId: string, part: string) {
+    const file = await this.downloadAttachment(nik, messageId, part);
+    const buffer = file.buffer;
+    if (!buffer?.length) {
+      throw new BadRequestException('Lampiran kosong');
+    }
+
+    // Prefer active Gmail mailbox token; else any Google account with Drive scope
+    const ctx = await this.resolveMailboxContext(nik);
+    let googleEmail = ctx.provider === 'gmail' ? ctx.email : null;
+    if (!googleEmail) {
+      const rows = await this.prisma.dT_GOOGLE_CREDENTIAL.findMany({
+        where: { nik },
+        select: { googleEmail: true, scope: true },
+        orderBy: { updatedAt: 'desc' },
+      });
+      const withDrive = rows.find((r) => hasDriveScope(r.scope));
+      googleEmail = withDrive?.googleEmail ?? null;
+    }
+    if (!googleEmail) {
+      throw new BadRequestException(
+        'Hubungkan Google (Calendar + Gmail + Drive) di Pengaturan untuk menyimpan ke Drive',
+      );
+    }
+
+    const token = await this.getGoogleAccessToken(nik, googleEmail);
+    // Ambil nama file + part kanonik dari detail pesan (partId stabil, bukan attachmentId).
+    let filename = (file.filename || '').trim();
+    let mime = file.contentType || 'application/octet-stream';
+    let recordPart = part;
+    try {
+      const detail = await this.getMessage(nik, messageId);
+      const atts = (detail.attachments || []) as Array<{
+        part?: string;
+        filename?: string;
+        contentType?: string;
+      }>;
+      let att = atts.find((a) => String(a.part) === String(part));
+      if (!att && atts.length === 1) att = atts[0];
+      if (att?.filename) filename = String(att.filename);
+      if (att?.contentType) mime = String(att.contentType);
+      recordPart = this.canonicalAttachmentPart(atts, part, filename);
+    } catch {
+      /* keep defaults */
+    }
+    filename = this.safeCloudFilename(filename, recordPart, mime);
+
+    const uploaded = await this.gmailDrive.uploadAndShare(token, {
+      filename,
+      mimeType: mime,
+      size: buffer.length,
+      buffer,
+      shareMode: 'restricted',
+    });
+
+    await this.recordSavedAttachment({
+      nik,
+      mailboxEmail: ctx.email,
+      messageId,
+      part: recordPart,
+      via: 'gdrive',
+      url: uploaded.url,
+      fileId: uploaded.fileId,
+      filename: uploaded.filename,
+    });
+
+    return {
+      via: 'gdrive' as const,
+      fileId: uploaded.fileId,
+      url: uploaded.url,
+      filename: uploaded.filename,
+      size: uploaded.size,
+    };
+  }
+
+  /**
+   * Salin lampiran pesan ke AMS Drive (My Drive user).
+   * Storage backend tetap Dropbox org, tapi file masuk kuota + DT_FILE milik NIK.
+   */
+  async saveAttachmentToAmsDrive(nik: string, messageId: string, part: string) {
+    const file = await this.downloadAttachment(nik, messageId, part);
+    const buffer = file.buffer;
+    if (!buffer?.length) {
+      throw new BadRequestException('Lampiran kosong');
+    }
+
+    let filename = (file.filename || '').trim();
+    let mime = file.contentType || 'application/octet-stream';
+    let recordPart = part;
+    try {
+      const detail = await this.getMessage(nik, messageId);
+      const atts = (detail.attachments || []) as Array<{
+        part?: string;
+        filename?: string;
+        contentType?: string;
+      }>;
+      let att = atts.find((a) => String(a.part) === String(part));
+      if (!att && atts.length === 1) att = atts[0];
+      if (att?.filename) filename = String(att.filename);
+      if (att?.contentType) mime = String(att.contentType);
+      recordPart = this.canonicalAttachmentPart(atts, part, filename);
+    } catch {
+      /* keep defaults */
+    }
+    filename = this.safeCloudFilename(filename, recordPart, mime);
+
+    const multerFile = {
+      fieldname: 'file',
+      originalname: filename,
+      encoding: '7bit',
+      mimetype: mime,
+      size: buffer.length,
+      buffer,
+      destination: '',
+      filename: '',
+      path: '',
+      stream: undefined as any,
+    } as Express.Multer.File;
+
+    try {
+      const created = await this.amsDrive.uploadFile(nik, multerFile);
+      const url = (created.url as string) || '/dashboard/cloud';
+      const fileId = created.id as string;
+      const outName = (created.name as string) || filename;
+      const ctx = await this.resolveMailboxContext(nik);
+      await this.recordSavedAttachment({
+        nik,
+        mailboxEmail: ctx.email,
+        messageId,
+        part: recordPart,
+        via: 'amsdrive',
+        url,
+        fileId,
+        filename: outName,
+      });
+      return {
+        via: 'amsdrive' as const,
+        fileId,
+        url,
+        filename: outName,
+        size: buffer.length,
+      };
+    } catch (err: any) {
+      const msg = String(err?.message || err || '');
+      if (
+        /Foreign key|P2003|ownerNik|User not found|Record to create/i.test(msg) ||
+        err?.code === 'P2003'
+      ) {
+        throw new BadRequestException(
+          'Aktifkan AMS Drive dulu (menu Cloud) sebelum menyimpan lampiran',
+        );
+      }
+      throw err;
+    }
+  }
+
+  /** @deprecated Gunakan saveAttachmentToAmsDrive — Dropbox org bukan drive personal. */
+  async saveAttachmentToDropbox(nik: string, messageId: string, part: string) {
+    return this.saveAttachmentToAmsDrive(nik, messageId, part);
+  }
+
+
+  /**
+   * Refresh Google access token for mailbox Gmail ops.
+   * Mirrors GoogleCalendarService.getValidAccessToken — kept here to avoid
+   * circular DI (GoogleCalendarService already imports MailboxService).
+   */
+  private async getGoogleAccessToken(nik: string, email: string): Promise<string> {
+    const row = await this.prisma.dT_GOOGLE_CREDENTIAL.findUnique({
+      where: { nik_googleEmail: { nik, googleEmail: email } },
+    });
+    if (!row || !hasGmailScope(row.scope)) {
+      throw new BadRequestException(
+        'Akun Gmail tidak ditemukan atau scope hilang — hubungkan ulang di Pengaturan',
+      );
+    }
+
+    const stillValid =
+      row.accessTokenExpiresAt &&
+      row.accessTokenExpiresAt.getTime() > Date.now() + 30_000;
+    if (stillValid) {
+      return this.crypto.decrypt({
+        cipher: row.accessTokenCipher,
+        iv: row.accessTokenIv,
+        tag: row.accessTokenTag,
+      });
+    }
+
+    const refreshToken = this.crypto.decrypt({
+      cipher: row.refreshTokenCipher,
+      iv: row.refreshTokenIv,
+      tag: row.refreshTokenTag,
+    });
+    const tokens = await this.oauth.refreshAccessToken(refreshToken);
+    const accessEnc = this.crypto.encrypt(tokens.access_token);
+    const expiresAt = new Date(
+      Date.now() + Math.max((tokens.expires_in || 3600) - 60, 60) * 1000,
+    );
+    const refreshEnc = tokens.refresh_token
+      ? this.crypto.encrypt(tokens.refresh_token)
+      : null;
+
+    await this.prisma.dT_GOOGLE_CREDENTIAL.update({
+      where: { id: row.id },
+      data: {
+        accessTokenCipher: accessEnc.cipher,
+        accessTokenIv: accessEnc.iv,
+        accessTokenTag: accessEnc.tag,
+        accessTokenExpiresAt: expiresAt,
+        ...(refreshEnc
+          ? {
+              refreshTokenCipher: refreshEnc.cipher,
+              refreshTokenIv: refreshEnc.iv,
+              refreshTokenTag: refreshEnc.tag,
+            }
+          : {}),
+        ...(tokens.scope ? { scope: tokens.scope } : {}),
+      },
+    });
+
+    return tokens.access_token;
   }
 
   private async resolveCredential(nik: string, accountEmail?: string) {
@@ -1407,7 +2288,7 @@ export class MailboxService {
 
     if (html && summary.id) {
       for (const att of attachments) {
-        const url = `/api/mailbox/attachments/${encodeURIComponent(summary.id)}/${encodeURIComponent(att.part)}`;
+        const url = `/api/mailbox/attachments/${encodeURIComponent(summary.id)}?part=${encodeURIComponent(att.part)}`;
         if (att.contentId) {
           const safeCid = att.contentId.replace(new RegExp("[.*+?^()|\[\]\\]", "g"), "\$&");
           html = html.replace(new RegExp(`cid:${safeCid}`, 'gi'), url);
@@ -1423,7 +2304,7 @@ export class MailboxService {
       html = html.replace(
         /(?:https?:\/\/[^"'\s>]+)?\/service\/home\/~?\/\?[^"'\s>]*part=([^&"'\s>]+)[^"'\s>]*/gi,
         (_match, part) => {
-          return `/api/mailbox/attachments/${encodeURIComponent(summary.id)}/${encodeURIComponent(part)}`;
+          return `/api/mailbox/attachments/${encodeURIComponent(summary.id)}?part=${encodeURIComponent(part)}`;
         },
       );
     }

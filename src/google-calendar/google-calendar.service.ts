@@ -13,6 +13,9 @@ import { MailboxCryptoService } from '../mailbox/mailbox-crypto.service';
 import { MailboxService, type CalendarEvent as ZimbraCalendarEvent } from '../mailbox/mailbox.service';
 import {
   GoogleOAuthClient,
+  hasCalendarScope,
+  hasDriveScope,
+  hasGmailScope,
   type GoogleCalendarEventRaw,
 } from './google-oauth.client';
 
@@ -58,7 +61,7 @@ export class GoogleCalendarService {
   }
 
   async getStatus(nik: string) {
-    const rows = await this.prisma.dT_GOOGLE_CALENDAR_CREDENTIAL.findMany({
+    const rows = await this.prisma.dT_GOOGLE_CREDENTIAL.findMany({
       where: { nik },
       orderBy: { createdAt: 'desc' },
       select: {
@@ -69,15 +72,25 @@ export class GoogleCalendarService {
         scope: true,
       },
     });
-    const accounts = rows.map((r) => ({
-      email: r.googleEmail,
-      name: (r.displayName || '').trim() || null,
-      createdAt: r.createdAt.toISOString(),
-      updatedAt: r.updatedAt.toISOString(),
-    }));
+    const accounts = rows.map((r) => {
+      const needsReauth =
+        !hasGmailScope(r.scope) ||
+        !hasCalendarScope(r.scope) ||
+        !hasDriveScope(r.scope);
+      return {
+        email: r.googleEmail,
+        name: (r.displayName || '').trim() || null,
+        createdAt: r.createdAt.toISOString(),
+        updatedAt: r.updatedAt.toISOString(),
+        needsReauth,
+      };
+    });
+    const needsReauth =
+      accounts.length > 0 && accounts.some((a) => a.needsReauth);
     return {
       configured: this.oauth.isConfigured(),
       connected: accounts.length > 0,
+      needsReauth,
       email: accounts[0]?.email ?? null,
       name: accounts[0]?.name ?? null,
       accounts,
@@ -163,13 +176,14 @@ export class GoogleCalendarService {
       throw new BadRequestException('Google tidak mengembalikan email');
     }
     const displayName = (info.name || '').trim() || null;
+    const photoUrl = (info.picture || '').trim() || null;
 
     const accessEnc = this.crypto.encrypt(tokens.access_token);
     const expiresAt = new Date(
       Date.now() + Math.max((tokens.expires_in || 3600) - 60, 60) * 1000,
     );
 
-    const existing = await this.prisma.dT_GOOGLE_CALENDAR_CREDENTIAL.findUnique({
+    const existing = await this.prisma.dT_GOOGLE_CREDENTIAL.findUnique({
       where: { nik_googleEmail: { nik: payload.nik, googleEmail: email } },
       select: {
         refreshTokenCipher: true,
@@ -194,13 +208,14 @@ export class GoogleCalendarService {
       );
     }
 
-    await this.prisma.dT_GOOGLE_CALENDAR_CREDENTIAL.upsert({
+    await this.prisma.dT_GOOGLE_CREDENTIAL.upsert({
       where: { nik_googleEmail: { nik: payload.nik, googleEmail: email } },
       create: {
         id: randomUUID(),
         nik: payload.nik,
         googleEmail: email,
         displayName,
+        photoUrl,
         accessTokenCipher: accessEnc.cipher,
         accessTokenIv: accessEnc.iv,
         accessTokenTag: accessEnc.tag,
@@ -208,10 +223,11 @@ export class GoogleCalendarService {
         refreshTokenIv: refreshEnc.iv,
         refreshTokenTag: refreshEnc.tag,
         accessTokenExpiresAt: expiresAt,
-        scope: tokens.scope || null,
+        scope: tokens.scope ?? null,
       },
       update: {
         ...(displayName ? { displayName } : {}),
+        ...(photoUrl ? { photoUrl } : {}),
         accessTokenCipher: accessEnc.cipher,
         accessTokenIv: accessEnc.iv,
         accessTokenTag: accessEnc.tag,
@@ -219,7 +235,7 @@ export class GoogleCalendarService {
         refreshTokenIv: refreshEnc.iv,
         refreshTokenTag: refreshEnc.tag,
         accessTokenExpiresAt: expiresAt,
-        scope: tokens.scope || null,
+        ...(tokens.scope ? { scope: tokens.scope } : {}),
       },
     });
 
@@ -234,7 +250,7 @@ export class GoogleCalendarService {
   async disconnect(nik: string, email: string) {
     const normalized = email.trim().toLowerCase();
     if (!normalized) throw new BadRequestException('Query email wajib');
-    const deleted = await this.prisma.dT_GOOGLE_CALENDAR_CREDENTIAL.deleteMany({
+    const deleted = await this.prisma.dT_GOOGLE_CREDENTIAL.deleteMany({
       where: { nik, googleEmail: normalized },
     });
     if (deleted.count === 0) {
@@ -244,7 +260,7 @@ export class GoogleCalendarService {
   }
 
   async getCalendars(nik: string) {
-    const accounts = await this.prisma.dT_GOOGLE_CALENDAR_CREDENTIAL.findMany({
+    const accounts = await this.prisma.dT_GOOGLE_CREDENTIAL.findMany({
       where: { nik },
       orderBy: { createdAt: 'desc' },
     });
@@ -281,7 +297,7 @@ export class GoogleCalendarService {
     if (!Number.isFinite(opts.start) || !Number.isFinite(opts.end) || opts.end <= opts.start) {
       throw new BadRequestException('Range start/end tidak valid');
     }
-    const accounts = await this.prisma.dT_GOOGLE_CALENDAR_CREDENTIAL.findMany({
+    const accounts = await this.prisma.dT_GOOGLE_CREDENTIAL.findMany({
       where: {
         nik,
         ...(opts.email ? { googleEmail: opts.email.trim().toLowerCase() } : {}),
@@ -387,12 +403,12 @@ export class GoogleCalendarService {
 
   private async resolveAccount(nik: string, email?: string) {
     const row = email?.trim()
-      ? await this.prisma.dT_GOOGLE_CALENDAR_CREDENTIAL.findUnique({
+      ? await this.prisma.dT_GOOGLE_CREDENTIAL.findUnique({
           where: {
             nik_googleEmail: { nik, googleEmail: email.trim().toLowerCase() },
           },
         })
-      : await this.prisma.dT_GOOGLE_CALENDAR_CREDENTIAL.findFirst({
+      : await this.prisma.dT_GOOGLE_CREDENTIAL.findFirst({
           where: { nik },
           orderBy: { createdAt: 'desc' },
         });
@@ -743,7 +759,7 @@ export class GoogleCalendarService {
       ? this.crypto.encrypt(tokens.refresh_token)
       : null;
 
-    await this.prisma.dT_GOOGLE_CALENDAR_CREDENTIAL.update({
+    await this.prisma.dT_GOOGLE_CREDENTIAL.update({
       where: { id: row.id },
       data: {
         accessTokenCipher: accessEnc.cipher,
