@@ -1689,13 +1689,19 @@ export class MailboxService {
    */
   async getGooglePickerConfig(nik: string) {
     const ctx = await this.resolveMailboxContext(nik);
-    let email = ctx.provider === 'gmail' ? ctx.email : null;
+    const rows = await this.prisma.dT_GOOGLE_CREDENTIAL.findMany({
+      where: { nik },
+      select: { googleEmail: true, scope: true },
+      orderBy: { updatedAt: 'desc' },
+    });
+    let email: string | null = null;
+    if (ctx.provider === 'gmail') {
+      const active = rows.find((r) => r.googleEmail === ctx.email);
+      if (active && hasDriveScope(active.scope)) {
+        email = active.googleEmail;
+      }
+    }
     if (!email) {
-      const rows = await this.prisma.dT_GOOGLE_CREDENTIAL.findMany({
-        where: { nik },
-        select: { googleEmail: true, scope: true },
-        orderBy: { updatedAt: 'desc' },
-      });
       email = rows.find((r) => hasDriveScope(r.scope))?.googleEmail ?? null;
     }
     if (!email) {
