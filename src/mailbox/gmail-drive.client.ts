@@ -210,7 +210,10 @@ export class GmailDriveClient {
         `${DRIVE_API}/files/${encodeURIComponent(fileId)}`,
         {
           headers: { Authorization: `Bearer ${accessToken}` },
-          params: { fields: 'webViewLink,webContentLink' },
+          params: {
+            fields: 'webViewLink,webContentLink',
+            supportsAllDrives: true,
+          },
           timeout: 20_000,
         },
       );

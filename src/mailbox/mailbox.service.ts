@@ -1720,11 +1720,15 @@ export class MailboxService {
       );
     }
 
-    const size = Number(meta.size || 0);
+    const size = Number(meta.size);
+    if (!Number.isFinite(size) || size <= 0) {
+      throw new BadRequestException('Ukuran file Drive tidak diketahui');
+    }
     const threshold =
       ctx.provider === 'gmail'
         ? MailboxService.GMAIL_MAX_ATTACHMENT_BYTES
         : MailboxService.AMS_DRIVE_THRESHOLD_BYTES;
+    const trimmedId = fileId.trim();
 
     if (size > MailboxService.MAX_ATTACHMENT_BYTES) {
       throw new BadRequestException('Lampiran maksimal 2GB');
@@ -1733,22 +1737,37 @@ export class MailboxService {
     if (size > threshold) {
       const url = await this.gmailDrive.ensureAnyoneReader(
         accessToken,
-        fileId.trim(),
+        trimmedId,
       );
       return {
         via: 'gdrive' as const,
         url,
-        fileId: meta.id || fileId.trim(),
+        fileId: meta.id || trimmedId,
         filename: meta.name,
         size,
         shareMode: 'anyone' as const,
       };
     }
 
-    const buffer = await this.gmailDrive.downloadFile(
-      accessToken,
-      fileId.trim(),
-    );
+    const buffer = await this.gmailDrive.downloadFile(accessToken, trimmedId);
+    const actual = buffer.length;
+    if (actual > MailboxService.MAX_ATTACHMENT_BYTES) {
+      throw new BadRequestException('Lampiran maksimal 2GB');
+    }
+    if (actual > threshold) {
+      const url = await this.gmailDrive.ensureAnyoneReader(
+        accessToken,
+        trimmedId,
+      );
+      return {
+        via: 'gdrive' as const,
+        url,
+        fileId: meta.id || trimmedId,
+        filename: meta.name,
+        size: actual,
+        shareMode: 'anyone' as const,
+      };
+    }
     return this.stageImportedBuffer(nik, ctx, {
       filename: meta.name,
       mimeType: meta.mimeType || 'application/octet-stream',
