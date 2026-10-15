@@ -13,11 +13,14 @@ import { MailboxService } from './mailbox.service';
 import { MailboxCryptoService } from './mailbox-crypto.service';
 import { ZimbraSoapClient } from './zimbra-soap.client';
 import { GmailApiClient } from './gmail-api.client';
+import { GmailDriveClient } from './gmail-drive.client';
+import { CloudDriveModule } from '../cloud/drive/drive.module';
 
 @Module({
   imports: [
     PrismaModule,
     StorageModule,
+    CloudDriveModule,
     JwtModule.register({}),
     MulterModule.register({
       storage: diskStorage({
@@ -36,6 +39,7 @@ import { GmailApiClient } from './gmail-api.client';
     MailboxCryptoService,
     ZimbraSoapClient,
     GmailApiClient,
+    GmailDriveClient,
     GoogleOAuthClient,
   ],
   exports: [MailboxService, MailboxCryptoService, GmailApiClient],

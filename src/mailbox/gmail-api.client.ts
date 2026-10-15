@@ -34,6 +34,21 @@ const SYSTEM_DISPLAY_NAMES: Record<string, string> = {
   TRASH: 'Trash',
 };
 
+/** Nested under Inbox (Gmail tabs). FE localizes display names by id. */
+const GMAIL_CATEGORY_ORDER = [
+  'CATEGORY_PERSONAL',
+  'CATEGORY_PROMOTIONS',
+  'CATEGORY_SOCIAL',
+  'CATEGORY_UPDATES',
+] as const;
+
+const CATEGORY_DISPLAY_NAMES: Record<(typeof GMAIL_CATEGORY_ORDER)[number], string> = {
+  CATEGORY_PERSONAL: 'Primary',
+  CATEGORY_PROMOTIONS: 'Promotions',
+  CATEGORY_SOCIAL: 'Social',
+  CATEGORY_UPDATES: 'Updates',
+};
+
 const META_LABELS = new Set([
   'UNREAD',
   'IMPORTANT',
@@ -111,7 +126,18 @@ export class GmailApiClient {
     for (const id of SYSTEM_FOLDER_ORDER) {
       const lab = byId.get(id);
       if (!lab) continue;
-      systemFolders.push(this.mapLabelToFolder(lab, SYSTEM_DISPLAY_NAMES[id] || lab.name || id));
+      const folder = this.mapLabelToFolder(
+        lab,
+        SYSTEM_DISPLAY_NAMES[id] || lab.name || id,
+      );
+      if (id === 'INBOX') {
+        folder.children = GMAIL_CATEGORY_ORDER.flatMap((cid) => {
+          const cat = byId.get(cid);
+          if (!cat) return [];
+          return [this.mapLabelToFolder(cat, CATEGORY_DISPLAY_NAMES[cid])];
+        });
+      }
+      systemFolders.push(folder);
     }
 
     const userLabels = labels.filter(
@@ -178,7 +204,7 @@ export class GmailApiClient {
 
     if (html && summary.id) {
       for (const att of attachments) {
-        const url = `/api/mailbox/attachments/${encodeURIComponent(summary.id)}/${encodeURIComponent(att.part)}`;
+        const url = `/api/mailbox/attachments/${encodeURIComponent(summary.id)}?part=${encodeURIComponent(att.part)}`;
         if (att.contentId) {
           const safeCid = this.escapeRegex(att.contentId);
           html = html.replace(new RegExp(`cid:${safeCid}`, 'gi'), url);
@@ -356,11 +382,50 @@ export class GmailApiClient {
     return { ok: true };
   }
 
+  /**
+   * Resolve MIME partId (`1.2`) → Gmail attachmentId. Bila input sudah attachmentId, pakai apa adanya.
+   */
+  async resolveAttachmentId(
+    accessToken: string,
+    messageId: string,
+    partOrAttachmentId: string,
+  ): Promise<string> {
+    const raw = String(partOrAttachmentId || '').trim();
+    if (!raw) throw new BadRequestException('Lampiran tidak valid');
+    // partId Gmail: "1", "1.2", "2.1.3" — selain itu anggap attachmentId
+    if (!/^\d+(\.\d+)*$/.test(raw)) return raw;
+
+    const msg = await this.get<GmailMessage>(
+      accessToken,
+      `/users/me/messages/${encodeURIComponent(messageId)}`,
+      { format: 'full' },
+    );
+    let found: string | null = null;
+    const walk = (part: GmailPart | undefined) => {
+      if (!part || found) return;
+      if (String(part.partId || '') === raw && part.body?.attachmentId) {
+        found = String(part.body.attachmentId);
+        return;
+      }
+      for (const child of part.parts || []) walk(child);
+    };
+    walk(msg.payload);
+    if (!found) {
+      throw new NotFoundException('Lampiran tidak ditemukan di pesan');
+    }
+    return found;
+  }
+
   async downloadAttachment(
     accessToken: string,
     messageId: string,
-    attachmentId: string,
+    partOrAttachmentId: string,
   ): Promise<{ data: Buffer; size: number }> {
+    const attachmentId = await this.resolveAttachmentId(
+      accessToken,
+      messageId,
+      partOrAttachmentId,
+    );
     const res = await this.get<{ data?: string; size?: number }>(
       accessToken,
       `/users/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`,
@@ -592,8 +657,10 @@ export class GmailApiClient {
         !ct.includes('text/plain') &&
         (part.body?.attachmentId || filename || contentId)
       ) {
+        // Prefer partId (pendek & stabil). attachmentId Gmail bisa >400 char dan
+        // berubah antar fetch — jelek untuk URL path + status "saved to Drive".
         const partKey =
-          part.body?.attachmentId || part.partId || filename || contentId || 'att';
+          part.partId || part.body?.attachmentId || filename || contentId || 'att';
         attachments.push({
           part: String(partKey),
           filename:

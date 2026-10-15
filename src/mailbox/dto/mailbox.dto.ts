@@ -60,6 +60,14 @@ export class SendMessageDto {
   @IsOptional()
   @IsString()
   attachmentParts?: string;
+
+  /**
+   * JSON array of Gmail Drive large attachments for recipient grants:
+   * [{ fileId, shareMode: 'anyone'|'restricted' }]
+   */
+  @IsOptional()
+  @IsString()
+  gdriveShares?: string;
 }
 
 export class MessageActionDto {

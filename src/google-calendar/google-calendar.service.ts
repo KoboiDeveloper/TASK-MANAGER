@@ -14,6 +14,7 @@ import { MailboxService, type CalendarEvent as ZimbraCalendarEvent } from '../ma
 import {
   GoogleOAuthClient,
   hasCalendarScope,
+  hasDriveScope,
   hasGmailScope,
   type GoogleCalendarEventRaw,
 } from './google-oauth.client';
@@ -73,7 +74,9 @@ export class GoogleCalendarService {
     });
     const accounts = rows.map((r) => {
       const needsReauth =
-        !hasGmailScope(r.scope) || !hasCalendarScope(r.scope);
+        !hasGmailScope(r.scope) ||
+        !hasCalendarScope(r.scope) ||
+        !hasDriveScope(r.scope);
       return {
         email: r.googleEmail,
         name: (r.displayName || '').trim() || null,
@@ -173,6 +176,7 @@ export class GoogleCalendarService {
       throw new BadRequestException('Google tidak mengembalikan email');
     }
     const displayName = (info.name || '').trim() || null;
+    const photoUrl = (info.picture || '').trim() || null;
 
     const accessEnc = this.crypto.encrypt(tokens.access_token);
     const expiresAt = new Date(
@@ -211,6 +215,7 @@ export class GoogleCalendarService {
         nik: payload.nik,
         googleEmail: email,
         displayName,
+        photoUrl,
         accessTokenCipher: accessEnc.cipher,
         accessTokenIv: accessEnc.iv,
         accessTokenTag: accessEnc.tag,
@@ -222,6 +227,7 @@ export class GoogleCalendarService {
       },
       update: {
         ...(displayName ? { displayName } : {}),
+        ...(photoUrl ? { photoUrl } : {}),
         accessTokenCipher: accessEnc.cipher,
         accessTokenIv: accessEnc.iv,
         accessTokenTag: accessEnc.tag,

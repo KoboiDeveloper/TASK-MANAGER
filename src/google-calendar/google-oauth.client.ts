@@ -13,6 +13,7 @@ export const GOOGLE_SCOPES = [
   'profile',
   'https://www.googleapis.com/auth/calendar',
   'https://www.googleapis.com/auth/gmail.modify',
+  'https://www.googleapis.com/auth/drive.file',
 ].join(' ');
 
 /** @deprecated Use GOOGLE_SCOPES */
@@ -33,6 +34,13 @@ export function hasCalendarScope(scope: string | null | undefined): boolean {
   return scope.split(/[\s,]+/).some((s) => s.includes('auth/calendar'));
 }
 
+export function hasDriveScope(scope: string | null | undefined): boolean {
+  if (!scope) return false;
+  return scope.split(/[\s,]+/).some(
+    (s) => s.includes('auth/drive.file') || s.includes('auth/drive'),
+  );
+}
+
 export type GoogleTokenResponse = {
   access_token: string;
   expires_in: number;
@@ -45,6 +53,7 @@ export type GoogleTokenResponse = {
 export type GoogleUserInfo = {
   email?: string;
   name?: string;
+  picture?: string;
   sub?: string;
 };
 
