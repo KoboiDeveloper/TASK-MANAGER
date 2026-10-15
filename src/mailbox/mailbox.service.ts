@@ -1795,7 +1795,7 @@ export class MailboxService {
     }
 
     const size = Number(file.bytes);
-    if (!Number.isFinite(size) || size < 0) {
+    if (!Number.isFinite(size) || size <= 0) {
       throw new BadRequestException('Ukuran file AMS Drive tidak diketahui');
     }
     const threshold =
@@ -1808,20 +1808,13 @@ export class MailboxService {
     }
 
     if (size > threshold) {
-      let url = file.url || '';
-      if (!url) {
-        url = (await this.amsDrive.getDownloadUrl(nik, trimmedId)).url;
-      }
-      if (!url) {
-        throw new BadRequestException('Gagal membuat tautan AMS Drive');
-      }
-      return {
-        via: 'amsdrive' as const,
-        url,
-        fileId: trimmedId,
-        filename: file.name,
+      return this.resolveAmsDriveLinkAttachment(
+        nik,
+        trimmedId,
+        file.name,
         size,
-      };
+        file.url,
+      );
     }
 
     const { buffer, name, mimeType } = await this.amsDrive.getPreviewBuffer(
@@ -1833,20 +1826,13 @@ export class MailboxService {
       throw new BadRequestException('Lampiran maksimal 2GB');
     }
     if (buffer.length > threshold) {
-      let url = file.url || '';
-      if (!url) {
-        url = (await this.amsDrive.getDownloadUrl(nik, trimmedId)).url;
-      }
-      if (!url) {
-        throw new BadRequestException('Gagal membuat tautan AMS Drive');
-      }
-      return {
-        via: 'amsdrive' as const,
-        url,
-        fileId: trimmedId,
-        filename: name,
-        size: buffer.length,
-      };
+      return this.resolveAmsDriveLinkAttachment(
+        nik,
+        trimmedId,
+        name,
+        buffer.length,
+        file.url,
+      );
     }
 
     return this.stageImportedBuffer(nik, ctx, {
@@ -1854,6 +1840,30 @@ export class MailboxService {
       mimeType: mimeType || 'application/octet-stream',
       buffer,
     });
+  }
+
+  /** Resolve AMS Drive share/download URL for large compose attachments. */
+  private async resolveAmsDriveLinkAttachment(
+    nik: string,
+    fileId: string,
+    filename: string,
+    size: number,
+    existingUrl?: string | null,
+  ) {
+    let url = existingUrl || '';
+    if (!url) {
+      url = (await this.amsDrive.getDownloadUrl(nik, fileId)).url;
+    }
+    if (!url) {
+      throw new BadRequestException('Gagal membuat tautan AMS Drive');
+    }
+    return {
+      via: 'amsdrive' as const,
+      url,
+      fileId,
+      filename,
+      size,
+    };
   }
 
   /**
