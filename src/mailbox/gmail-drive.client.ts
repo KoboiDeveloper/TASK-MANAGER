@@ -146,7 +146,7 @@ export class GmailDriveClient {
             fields: 'id,name,mimeType,size,webViewLink',
             supportsAllDrives: true,
           },
-          timeout: 20_000,
+          timeout: 60_000,
         },
       );
       const d = res.data || {};
@@ -224,7 +224,7 @@ export class GmailDriveClient {
         {
           headers: { Authorization: `Bearer ${accessToken}` },
           params: { supportsAllDrives: true },
-          timeout: 30_000,
+          timeout: 60_000,
         },
       );
     } catch (e) {
@@ -245,7 +245,7 @@ export class GmailDriveClient {
             fields: 'webViewLink,webContentLink',
             supportsAllDrives: true,
           },
-          timeout: 20_000,
+          timeout: 60_000,
         },
       );
       url = String(
@@ -293,7 +293,16 @@ export class GmailDriveClient {
 
   private rethrowDrive(e: unknown, fallback: string): never {
     const ax = e as AxiosError<{ error?: { message?: string } }>;
-    const msg = ax.response?.data?.error?.message || (e as Error).message || fallback;
-    throw new BadRequestException(msg);
+    const code = ax.code || '';
+    const raw = ax.response?.data?.error?.message || (e as Error).message || fallback;
+    if (
+      code === 'ECONNABORTED' ||
+      /timeout of \d+ms exceeded/i.test(String(raw))
+    ) {
+      throw new BadRequestException(
+        'Google Drive lambat merespons. Coba lagi sebentar.',
+      );
+    }
+    throw new BadRequestException(raw);
   }
 }
