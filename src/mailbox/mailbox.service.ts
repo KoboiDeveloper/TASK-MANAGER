@@ -1825,6 +1825,113 @@ export class MailboxService {
   }
 
   /**
+   * Copy a Google Drive file into the user's AMS Drive (My Drive).
+   * Workspace Docs/Sheets/Slides → export PDF first.
+   */
+  async saveGdriveFileToAmsDrive(nik: string, fileId: string) {
+    if (!fileId?.trim()) {
+      throw new BadRequestException('fileId wajib');
+    }
+    const trimmedId = fileId.trim();
+    const { accessToken } = await this.resolveDriveAccess(nik);
+
+    let meta: {
+      id: string;
+      name: string;
+      mimeType: string;
+      size: number;
+    };
+    try {
+      meta = await this.gmailDrive.getFileMeta(accessToken, trimmedId);
+    } catch (e) {
+      const msg = String((e as Error)?.message || e || '');
+      if (/File not found|404|notFound/i.test(msg)) {
+        throw new BadRequestException(
+          'File Drive tidak bisa diakses. Pastikan GOOGLE_CLOUD_PROJECT_NUMBER di-set, lalu coba lagi.',
+        );
+      }
+      throw e;
+    }
+
+    const mime = String(meta.mimeType || '');
+    let buffer: Buffer;
+    let filename = meta.name;
+    let contentType = mime || 'application/octet-stream';
+
+    if (mime.startsWith('application/vnd.google-apps.')) {
+      if (!MailboxService.googleAppsShareable(mime)) {
+        throw new BadRequestException(
+          'Tipe Google Drive ini tidak bisa disimpan ke AMS Drive',
+        );
+      }
+      buffer = await this.gmailDrive.exportFile(
+        accessToken,
+        trimmedId,
+        'application/pdf',
+      );
+      const base = meta.name.replace(/\.[^.]+$/, '') || meta.name;
+      filename = `${base}.pdf`;
+      contentType = 'application/pdf';
+    } else {
+      buffer = await this.gmailDrive.downloadFile(accessToken, trimmedId);
+    }
+
+    if (!buffer.length) {
+      throw new BadRequestException('File Drive kosong');
+    }
+    if (buffer.length > MailboxService.MAX_ATTACHMENT_BYTES) {
+      throw new BadRequestException('Lampiran maksimal 2GB');
+    }
+
+    const cloudUser = await this.cloudPrisma.dT_USER.findUnique({
+      where: { nik: nik.trim() },
+      select: { nik: true, statusActive: true },
+    });
+    if (!cloudUser?.statusActive) {
+      throw new BadRequestException(
+        'Hubungkan AMS Drive dulu (menu Cloud) untuk menyimpan file',
+      );
+    }
+
+    const multerLike = {
+      originalname: filename,
+      mimetype: contentType,
+      size: buffer.length,
+      buffer,
+    } as Express.Multer.File;
+
+    try {
+      const uploaded = await this.amsDrive.uploadFile(nik, multerLike);
+      const url = (uploaded.url as string) || '';
+      if (!url) {
+        throw new BadRequestException('Gagal membuat tautan AMS Drive');
+      }
+      return {
+        via: 'amsdrive' as const,
+        fileId: uploaded.id as string,
+        url,
+        filename: (uploaded.name as string) || filename,
+        size: buffer.length,
+      };
+    } catch (err: any) {
+      const msg = String(err?.message || err || '');
+      if (err instanceof BadRequestException) throw err;
+      if (
+        /Foreign key|P2003|ownerNik|User not found|Record to create/i.test(msg) ||
+        err?.code === 'P2003'
+      ) {
+        throw new BadRequestException(
+          'Hubungkan AMS Drive dulu (menu Cloud) untuk menyimpan file',
+        );
+      }
+      if (/quota exceeded/i.test(msg)) {
+        throw new BadRequestException('Kuota AMS Drive penuh');
+      }
+      throw err;
+    }
+  }
+
+  /**
    * Import an existing AMS Drive file into compose: MIME stage (small) or share link (large).
    * Loads DT_FILE size first so large files never hit getPreviewBuffer (full download).
    */

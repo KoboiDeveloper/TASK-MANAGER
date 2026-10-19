@@ -300,6 +300,22 @@ export class MailboxController {
     }
   }
 
+  @Post('attachments/gdrive-to-ams-drive')
+  async gdriveToAmsDrive(
+    @Req() req: Request & { user?: AuthUser },
+    @Body() dto: FromGdriveAttachmentDto,
+  ) {
+    try {
+      const data = await this.mailbox.saveGdriveFileToAmsDrive(
+        req.user!.nik,
+        dto.fileId,
+      );
+      return new CommonResponse('OK', HttpStatus.OK, data);
+    } catch (e) {
+      return handleException(e);
+    }
+  }
+
   @Post('attachments')
   @UseFilters(MulterExceptionFilter)
   @UseInterceptors(
