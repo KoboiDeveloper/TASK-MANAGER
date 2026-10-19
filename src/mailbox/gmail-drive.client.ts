@@ -127,6 +127,86 @@ export class GmailDriveClient {
     };
   }
 
+  /**
+   * List Drive folder / views. Needs drive.readonly (or full drive) for complete My Drive.
+   * With drive.file alone, only app-opened/created files appear.
+   */
+  async listFiles(
+    accessToken: string,
+    input: {
+      mode?: 'my' | 'shared' | 'recent' | 'starred' | 'trash';
+      folderId?: string | null;
+      pageSize?: number;
+    } = {},
+  ): Promise<
+    {
+      id: string;
+      name: string;
+      mimeType: string;
+      size: number;
+      starred: boolean;
+      trashed: boolean;
+      modifiedTime?: string;
+      createdTime?: string;
+      webViewLink?: string;
+      parents?: string[];
+    }[]
+  > {
+    const mode = input.mode || 'my';
+    const pageSize = Math.min(Math.max(input.pageSize || 100, 1), 200);
+    const parts: string[] = [];
+    if (mode === 'trash') {
+      parts.push('trashed=true');
+    } else if (mode === 'shared') {
+      parts.push('sharedWithMe=true', 'trashed=false');
+    } else if (mode === 'starred') {
+      parts.push('starred=true', 'trashed=false');
+    } else if (mode === 'recent') {
+      parts.push('trashed=false');
+    } else {
+      const parent = input.folderId?.trim() || 'root';
+      parts.push(`'${parent.replace(/'/g, "\\'")}' in parents`, 'trashed=false');
+    }
+    const params: Record<string, string | number | boolean> = {
+      q: parts.join(' and '),
+      pageSize,
+      spaces: 'drive',
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+      fields:
+        'files(id,name,mimeType,size,starred,trashed,modifiedTime,createdTime,webViewLink,parents)',
+    };
+    if (mode === 'recent') {
+      params.orderBy = 'viewedByMeTime desc';
+    } else {
+      params.orderBy = 'folder,name_natural';
+    }
+    try {
+      const res = await axios.get(`${DRIVE_API}/files`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        params,
+        timeout: 60_000,
+      });
+      const files = Array.isArray(res.data?.files) ? res.data.files : [];
+      return files.map((d: Record<string, unknown>) => ({
+        id: String(d.id || ''),
+        name: String(d.name || 'file'),
+        mimeType: String(d.mimeType || 'application/octet-stream'),
+        size: Number(d.size || 0),
+        starred: !!d.starred,
+        trashed: !!d.trashed,
+        modifiedTime: d.modifiedTime ? String(d.modifiedTime) : undefined,
+        createdTime: d.createdTime ? String(d.createdTime) : undefined,
+        webViewLink: d.webViewLink ? String(d.webViewLink) : undefined,
+        parents: Array.isArray(d.parents)
+          ? d.parents.map((p) => String(p))
+          : undefined,
+      }));
+    } catch (e) {
+      this.rethrowDrive(e, 'Gagal memuat daftar Google Drive');
+    }
+  }
+
   async getFileMeta(
     accessToken: string,
     fileId: string,

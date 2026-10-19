@@ -2023,9 +2023,12 @@ export class MailboxService {
   }
 
   /**
-   * Prefer active Gmail email only if it has drive.file; else any credential with Drive scope.
+   * Prefer explicit email, else active Gmail with Drive scope, else any Drive credential.
    */
-  private async resolveDriveAccess(nik: string): Promise<{
+  private async resolveDriveAccess(
+    nik: string,
+    preferEmail?: string,
+  ): Promise<{
     googleEmail: string;
     accessToken: string;
   }> {
@@ -2036,7 +2039,19 @@ export class MailboxService {
       orderBy: { updatedAt: 'desc' },
     });
     let email: string | null = null;
-    if (ctx.provider === 'gmail') {
+    const want = preferEmail?.trim().toLowerCase();
+    if (want) {
+      const row = rows.find(
+        (r) => r.googleEmail.toLowerCase() === want && hasDriveScope(r.scope),
+      );
+      email = row?.googleEmail ?? null;
+      if (!email) {
+        throw new BadRequestException(
+          `Akun Google ${preferEmail} belum punya akses Drive. Hubungkan ulang di Pengaturan.`,
+        );
+      }
+    }
+    if (!email && ctx.provider === 'gmail') {
       const active = rows.find((r) => r.googleEmail === ctx.email);
       if (active && hasDriveScope(active.scope)) {
         email = active.googleEmail;
@@ -2052,6 +2067,61 @@ export class MailboxService {
     }
     const accessToken = await this.getGoogleAccessToken(nik, email);
     return { googleEmail: email, accessToken };
+  }
+
+  /** Browse Google Drive for /dashboard/cloud account switcher. */
+  async listGoogleDrive(
+    nik: string,
+    input: {
+      email?: string;
+      folderId?: string | null;
+      mode?: 'my' | 'shared' | 'recent' | 'starred' | 'trash';
+    } = {},
+  ) {
+    const mode = input.mode || 'my';
+    const { googleEmail, accessToken } = await this.resolveDriveAccess(
+      nik,
+      input.email,
+    );
+    const raw = await this.gmailDrive.listFiles(accessToken, {
+      mode,
+      folderId: mode === 'my' ? input.folderId : null,
+    });
+    const FOLDER_MIME = 'application/vnd.google-apps.folder';
+    const folders = raw
+      .filter((f) => f.mimeType === FOLDER_MIME)
+      .map((f) => ({
+        id: f.id,
+        name: f.name,
+        parentId: f.parents?.[0] ?? null,
+        ownerNik: googleEmail,
+        starred: f.starred,
+        trashedAt: f.trashed ? f.modifiedTime || null : null,
+        createdAt: f.createdTime || f.modifiedTime || new Date().toISOString(),
+        updatedAt: f.modifiedTime || f.createdTime || new Date().toISOString(),
+        type: 'FOLDER' as const,
+        permission: 'owner',
+        itemCount: 0,
+      }));
+    const files = raw
+      .filter((f) => f.mimeType !== FOLDER_MIME)
+      .map((f) => ({
+        id: f.id,
+        name: f.name,
+        mimeType: f.mimeType,
+        bytes: String(f.size || 0),
+        dropboxPath: '',
+        url: f.webViewLink || `https://drive.google.com/file/d/${f.id}/view`,
+        folderId: f.parents?.[0] ?? null,
+        ownerNik: googleEmail,
+        starred: f.starred,
+        trashedAt: f.trashed ? f.modifiedTime || null : null,
+        createdAt: f.createdTime || f.modifiedTime || new Date().toISOString(),
+        updatedAt: f.modifiedTime || f.createdTime || new Date().toISOString(),
+        type: 'FILE' as const,
+        permission: 'owner',
+      }));
+    return { folders, files, googleEmail };
   }
 
   /** Stage/upload a buffer as a small MIME attachment (gmail disk stage or zimbra upload). */

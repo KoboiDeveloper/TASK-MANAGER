@@ -14,6 +14,8 @@ export const GOOGLE_SCOPES = [
   'https://www.googleapis.com/auth/calendar',
   'https://www.googleapis.com/auth/gmail.modify',
   'https://www.googleapis.com/auth/drive.file',
+  /** List/browse My Drive in /dashboard/cloud (drive.file alone cannot list full Drive). */
+  'https://www.googleapis.com/auth/drive.readonly',
 ].join(' ');
 
 /** @deprecated Use GOOGLE_SCOPES */
@@ -39,6 +41,20 @@ export function hasDriveScope(scope: string | null | undefined): boolean {
   return scope.split(/[\s,]+/).some(
     (s) => s.includes('auth/drive.file') || s.includes('auth/drive'),
   );
+}
+
+/** Full My Drive list — not satisfied by drive.file alone. */
+export function hasDriveReadonlyScope(scope: string | null | undefined): boolean {
+  if (!scope) return false;
+  return scope.split(/[\s,]+/).some((s) => {
+    if (s.includes('auth/drive.file')) return false;
+    return (
+      s.includes('auth/drive.readonly') ||
+      s.includes('auth/drive.metadata.readonly') ||
+      s.endsWith('/auth/drive') ||
+      s.endsWith('/auth/drive.readonly')
+    );
+  });
 }
 
 export type GoogleTokenResponse = {

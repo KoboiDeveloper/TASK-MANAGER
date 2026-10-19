@@ -115,6 +115,29 @@ export class MailboxController {
     }
   }
 
+  @Get('google/drive/list')
+  async listGoogleDrive(
+    @Req() req: Request & { user?: AuthUser },
+    @Query('email') email?: string,
+    @Query('folderId') folderId?: string,
+    @Query('mode') mode?: string,
+  ) {
+    try {
+      const allowed = ['my', 'shared', 'recent', 'starred', 'trash'] as const;
+      const m = allowed.includes(mode as (typeof allowed)[number])
+        ? (mode as (typeof allowed)[number])
+        : 'my';
+      const data = await this.mailbox.listGoogleDrive(req.user!.nik, {
+        email,
+        folderId: folderId || null,
+        mode: m,
+      });
+      return new CommonResponse('OK', HttpStatus.OK, data);
+    } catch (e) {
+      return handleException(e);
+    }
+  }
+
   @Get('events')
   async events(
     @Req() req: Request & { user?: AuthUser },

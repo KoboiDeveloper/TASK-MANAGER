@@ -15,6 +15,7 @@ import {
   GoogleOAuthClient,
   hasCalendarScope,
   hasDriveScope,
+  hasDriveReadonlyScope,
   hasGmailScope,
   type GoogleCalendarEventRaw,
 } from './google-oauth.client';
@@ -76,7 +77,8 @@ export class GoogleCalendarService {
       const needsReauth =
         !hasGmailScope(r.scope) ||
         !hasCalendarScope(r.scope) ||
-        !hasDriveScope(r.scope);
+        !hasDriveScope(r.scope) ||
+        !hasDriveReadonlyScope(r.scope);
       return {
         email: r.googleEmail,
         name: (r.displayName || '').trim() || null,

@@ -1,15 +1,17 @@
 import {
   GOOGLE_SCOPES,
   hasCalendarScope,
+  hasDriveReadonlyScope,
   hasDriveScope,
   hasGmailScope,
 } from './google-oauth.client';
 
 describe('Google OAuth scopes', () => {
-  it('GOOGLE_SCOPES includes calendar, gmail.modify, and drive.file', () => {
+  it('GOOGLE_SCOPES includes calendar, gmail.modify, drive.file, and drive.readonly', () => {
     expect(GOOGLE_SCOPES).toContain('auth/calendar');
     expect(GOOGLE_SCOPES).toContain('gmail.modify');
     expect(GOOGLE_SCOPES).toContain('drive.file');
+    expect(GOOGLE_SCOPES).toContain('drive.readonly');
   });
 
   describe('hasGmailScope', () => {
@@ -45,6 +47,22 @@ describe('Google OAuth scopes', () => {
       expect(
         hasDriveScope('https://www.googleapis.com/auth/gmail.modify'),
       ).toBe(false);
+    });
+  });
+
+  describe('hasDriveReadonlyScope', () => {
+    it('rejects drive.file alone', () => {
+      expect(
+        hasDriveReadonlyScope('https://www.googleapis.com/auth/drive.file'),
+      ).toBe(false);
+    });
+
+    it('detects drive.readonly', () => {
+      expect(
+        hasDriveReadonlyScope(
+          'https://www.googleapis.com/auth/drive.readonly',
+        ),
+      ).toBe(true);
     });
   });
 
