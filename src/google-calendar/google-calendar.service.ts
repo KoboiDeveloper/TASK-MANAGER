@@ -28,6 +28,9 @@ type OAuthStatePayload = {
   returnOrigin?: string;
 };
 
+/** Max Google accounts per AMS user (Calendar + Gmail + Drive). */
+export const MAX_GOOGLE_ACCOUNTS = 2;
+
 export type GoogleCalendarEvent = {
   id: string;
   appointmentId: string;
@@ -104,6 +107,12 @@ export class GoogleCalendarService {
     if (!this.oauth.isConfigured()) {
       throw new BadRequestException(
         'Google Calendar OAuth belum dikonfigurasi di server',
+      );
+    }
+    const count = await this.prisma.dT_GOOGLE_CREDENTIAL.count({ where: { nik } });
+    if (count >= MAX_GOOGLE_ACCOUNTS) {
+      throw new BadRequestException(
+        `Maksimal ${MAX_GOOGLE_ACCOUNTS} akun Google. Putuskan atau ganti salah satu dulu.`,
       );
     }
     let origin: string | undefined;
@@ -193,6 +202,17 @@ export class GoogleCalendarService {
         refreshTokenTag: true,
       },
     });
+
+    if (!existing) {
+      const count = await this.prisma.dT_GOOGLE_CREDENTIAL.count({
+        where: { nik: payload.nik },
+      });
+      if (count >= MAX_GOOGLE_ACCOUNTS) {
+        throw new BadRequestException(
+          `Maksimal ${MAX_GOOGLE_ACCOUNTS} akun Google. Putuskan atau ganti salah satu dulu.`,
+        );
+      }
+    }
 
     let refreshEnc = tokens.refresh_token
       ? this.crypto.encrypt(tokens.refresh_token)
