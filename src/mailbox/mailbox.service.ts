@@ -1728,29 +1728,78 @@ export class MailboxService {
       const msg = String((e as Error)?.message || e || '');
       if (/File not found|404|notFound/i.test(msg)) {
         throw new BadRequestException(
-          'File Drive tidak bisa diakses. Pastikan GOOGLE_CLOUD_PROJECT_NUMBER di-set, atau export Google Docs ke PDF lalu lampirkan lagi.',
+          'File Drive tidak bisa diakses. Pastikan GOOGLE_CLOUD_PROJECT_NUMBER di-set di server, lalu pilih ulang file.',
         );
       }
       throw e;
     }
 
-    if (
-      String(meta.mimeType || '').startsWith('application/vnd.google-apps.')
-    ) {
-      throw new BadRequestException(
-        'File Google Docs/Sheets tidak bisa dilampirkan langsung — export dulu ke PDF/DOCX',
+    const threshold =
+      ctx.provider === 'gmail'
+        ? MailboxService.GMAIL_MAX_ATTACHMENT_BYTES
+        : MailboxService.AMS_DRIVE_THRESHOLD_BYTES;
+    const trimmedId = fileId.trim();
+    const mime = String(meta.mimeType || '');
+
+    // Google Workspace native → export PDF (or share link if over threshold)
+    if (mime.startsWith('application/vnd.google-apps.')) {
+      const exportMime = MailboxService.googleAppsExportMime(mime);
+      if (!exportMime) {
+        throw new BadRequestException(
+          'Tipe Google Drive ini tidak bisa dilampirkan (folder/form/dll)',
+        );
+      }
+      // Docs often report size 0 — prefer share link when meta says huge; else export then measure
+      const reported = Number(meta.size);
+      if (Number.isFinite(reported) && reported > threshold) {
+        const url = await this.gmailDrive.ensureAnyoneReader(
+          accessToken,
+          trimmedId,
+        );
+        return {
+          via: 'gdrive' as const,
+          url,
+          fileId: meta.id || trimmedId,
+          filename: meta.name,
+          size: reported,
+          shareMode: 'anyone' as const,
+        };
+      }
+      const buffer = await this.gmailDrive.exportFile(
+        accessToken,
+        trimmedId,
+        exportMime,
       );
+      const actual = buffer.length;
+      if (actual > MailboxService.MAX_ATTACHMENT_BYTES) {
+        throw new BadRequestException('Lampiran maksimal 2GB');
+      }
+      if (actual > threshold) {
+        const url = await this.gmailDrive.ensureAnyoneReader(
+          accessToken,
+          trimmedId,
+        );
+        return {
+          via: 'gdrive' as const,
+          url,
+          fileId: meta.id || trimmedId,
+          filename: meta.name,
+          size: actual,
+          shareMode: 'anyone' as const,
+        };
+      }
+      const baseName = meta.name.replace(/\.[^.]+$/, '') || meta.name;
+      return this.stageImportedBuffer(nik, ctx, {
+        filename: `${baseName}.pdf`,
+        mimeType: exportMime,
+        buffer,
+      });
     }
 
     const size = Number(meta.size);
     if (!Number.isFinite(size) || size <= 0) {
       throw new BadRequestException('Ukuran file Drive tidak diketahui');
     }
-    const threshold =
-      ctx.provider === 'gmail'
-        ? MailboxService.GMAIL_MAX_ATTACHMENT_BYTES
-        : MailboxService.AMS_DRIVE_THRESHOLD_BYTES;
-    const trimmedId = fileId.trim();
 
     if (size > MailboxService.MAX_ATTACHMENT_BYTES) {
       throw new BadRequestException('Lampiran maksimal 2GB');
@@ -1795,6 +1844,19 @@ export class MailboxService {
       mimeType: meta.mimeType || 'application/octet-stream',
       buffer,
     });
+  }
+
+  /** Map Workspace MIME → Drive export MIME (PDF). */
+  private static googleAppsExportMime(mime: string): string | null {
+    switch (mime) {
+      case 'application/vnd.google-apps.document':
+      case 'application/vnd.google-apps.spreadsheet':
+      case 'application/vnd.google-apps.presentation':
+      case 'application/vnd.google-apps.drawing':
+        return 'application/pdf';
+      default:
+        return null;
+    }
   }
 
   /**

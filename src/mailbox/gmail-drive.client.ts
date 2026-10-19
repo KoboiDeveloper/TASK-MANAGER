@@ -181,6 +181,37 @@ export class GmailDriveClient {
     }
   }
 
+  /**
+   * Export Google Workspace files (Docs/Sheets/Slides/…) to a downloadable MIME.
+   * @see https://developers.google.com/drive/api/guides/manage-downloads#export
+   */
+  async exportFile(
+    accessToken: string,
+    fileId: string,
+    exportMimeType: string,
+  ): Promise<Buffer> {
+    try {
+      const res = await axios.get(
+        `${DRIVE_API}/files/${encodeURIComponent(fileId)}/export`,
+        {
+          headers: { Authorization: `Bearer ${accessToken}` },
+          params: { mimeType: exportMimeType },
+          responseType: 'arraybuffer',
+          maxContentLength: Infinity,
+          maxBodyLength: Infinity,
+          timeout: 5 * 60_000,
+        },
+      );
+      const buf = Buffer.from(res.data);
+      if (!buf.length) {
+        throw new BadRequestException('Export Drive kosong');
+      }
+      return buf;
+    } catch (e) {
+      this.rethrowDrive(e, 'Export Google Docs gagal');
+    }
+  }
+
   /** Ensure anyone-with-link reader; return webViewLink (fallback constructed URL). */
   async ensureAnyoneReader(
     accessToken: string,
