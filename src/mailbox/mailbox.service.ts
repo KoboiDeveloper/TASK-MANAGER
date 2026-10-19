@@ -1741,59 +1741,27 @@ export class MailboxService {
     const trimmedId = fileId.trim();
     const mime = String(meta.mimeType || '');
 
-    // Google Workspace native → export PDF (or share link if over threshold)
+    // Google Workspace native (Docs/Sheets/Slides/Drawing) → always share link.
+    // Keep original Doc as Doc — do not export to PDF.
     if (mime.startsWith('application/vnd.google-apps.')) {
-      const exportMime = MailboxService.googleAppsExportMime(mime);
-      if (!exportMime) {
+      if (!MailboxService.googleAppsShareable(mime)) {
         throw new BadRequestException(
           'Tipe Google Drive ini tidak bisa dilampirkan (folder/form/dll)',
         );
       }
-      // Docs often report size 0 — prefer share link when meta says huge; else export then measure
-      const reported = Number(meta.size);
-      if (Number.isFinite(reported) && reported > threshold) {
-        const url = await this.gmailDrive.ensureAnyoneReader(
-          accessToken,
-          trimmedId,
-        );
-        return {
-          via: 'gdrive' as const,
-          url,
-          fileId: meta.id || trimmedId,
-          filename: meta.name,
-          size: reported,
-          shareMode: 'anyone' as const,
-        };
-      }
-      const buffer = await this.gmailDrive.exportFile(
+      const url = await this.gmailDrive.ensureAnyoneReader(
         accessToken,
         trimmedId,
-        exportMime,
       );
-      const actual = buffer.length;
-      if (actual > MailboxService.MAX_ATTACHMENT_BYTES) {
-        throw new BadRequestException('Lampiran maksimal 2GB');
-      }
-      if (actual > threshold) {
-        const url = await this.gmailDrive.ensureAnyoneReader(
-          accessToken,
-          trimmedId,
-        );
-        return {
-          via: 'gdrive' as const,
-          url,
-          fileId: meta.id || trimmedId,
-          filename: meta.name,
-          size: actual,
-          shareMode: 'anyone' as const,
-        };
-      }
-      const baseName = meta.name.replace(/\.[^.]+$/, '') || meta.name;
-      return this.stageImportedBuffer(nik, ctx, {
-        filename: `${baseName}.pdf`,
-        mimeType: exportMime,
-        buffer,
-      });
+      const reported = Number(meta.size);
+      return {
+        via: 'gdrive' as const,
+        url,
+        fileId: meta.id || trimmedId,
+        filename: meta.name,
+        size: Number.isFinite(reported) && reported > 0 ? reported : 0,
+        shareMode: 'anyone' as const,
+      };
     }
 
     const size = Number(meta.size);
@@ -1846,17 +1814,14 @@ export class MailboxService {
     });
   }
 
-  /** Map Workspace MIME → Drive export MIME (PDF). */
-  private static googleAppsExportMime(mime: string): string | null {
-    switch (mime) {
-      case 'application/vnd.google-apps.document':
-      case 'application/vnd.google-apps.spreadsheet':
-      case 'application/vnd.google-apps.presentation':
-      case 'application/vnd.google-apps.drawing':
-        return 'application/pdf';
-      default:
-        return null;
-    }
+  /** Workspace types we can share as Drive link (not folder/form/etc). */
+  private static googleAppsShareable(mime: string): boolean {
+    return (
+      mime === 'application/vnd.google-apps.document' ||
+      mime === 'application/vnd.google-apps.spreadsheet' ||
+      mime === 'application/vnd.google-apps.presentation' ||
+      mime === 'application/vnd.google-apps.drawing'
+    );
   }
 
   /**
