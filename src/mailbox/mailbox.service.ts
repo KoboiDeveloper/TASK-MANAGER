@@ -1698,7 +1698,12 @@ export class MailboxService {
         'Google Picker belum dikonfigurasi di server',
       );
     }
-    return { clientId, apiKey, accessToken, googleEmail };
+    // Project number (not Client ID) — required so Picker grants drive.file access on pick
+    const appId =
+      process.env.GOOGLE_CLOUD_PROJECT_NUMBER?.trim() ||
+      process.env.GOOGLE_PROJECT_NUMBER?.trim() ||
+      undefined;
+    return { clientId, apiKey, accessToken, googleEmail, ...(appId ? { appId } : {}) };
   }
 
   /**
@@ -1710,7 +1715,24 @@ export class MailboxService {
     }
     const ctx = await this.resolveMailboxContext(nik);
     const { accessToken } = await this.resolveDriveAccess(nik);
-    const meta = await this.gmailDrive.getFileMeta(accessToken, fileId.trim());
+    let meta: {
+      id: string;
+      name: string;
+      mimeType: string;
+      size: number;
+      webViewLink?: string;
+    };
+    try {
+      meta = await this.gmailDrive.getFileMeta(accessToken, fileId.trim());
+    } catch (e) {
+      const msg = String((e as Error)?.message || e || '');
+      if (/File not found|404|notFound/i.test(msg)) {
+        throw new BadRequestException(
+          'File Drive tidak bisa diakses. Pastikan GOOGLE_CLOUD_PROJECT_NUMBER di-set, atau export Google Docs ke PDF lalu lampirkan lagi.',
+        );
+      }
+      throw e;
+    }
 
     if (
       String(meta.mimeType || '').startsWith('application/vnd.google-apps.')
