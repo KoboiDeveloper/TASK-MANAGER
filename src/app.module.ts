@@ -16,6 +16,7 @@ import { ChatModule } from './chat/chat.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { GoogleCalendarModule } from './google-calendar/google-calendar.module';
 import { CloudModule } from './cloud/cloud.module';
+import { DailyTaskModule } from './daily-task/daily-task.module';
 
 @Module({
   imports: [
@@ -37,6 +38,7 @@ import { CloudModule } from './cloud/cloud.module';
     NotificationsModule,
     GoogleCalendarModule,
     CloudModule,
+    DailyTaskModule,
   ],
   controllers: [AppController],
   providers: [AppService],

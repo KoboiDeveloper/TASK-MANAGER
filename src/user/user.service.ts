@@ -17,6 +17,7 @@ import { EmpHRIS, ResponseListUsersDto, ResponseUserContains } from './dto/respo
 import { DropboxStorageService } from '../storage/dropbox.storage.service';
 import { assertImageFile, getOriginalName, safeUserPhotoPath } from '../utils/file';
 import { generateColorFromString } from '../utils/color';
+import { profileImageUrl } from '../utils/profile-image';
 import { MailService } from '../utils/mail/mail.service';
 import { PushService } from '../notifications/push.service';
 
@@ -34,7 +35,9 @@ interface IuserService {
     limit: number,
     offset: number,
     search?: string,
+    departement?: string,
   ): Promise<{ data: ResponseListUsersDto[]; total: number; hasMore: boolean }>;
+  listDepartments(): Promise<string[]>;
   findAdmin(): Promise<{ nik: string; nama: string }[]>;
   isActive(nik: string): Promise<boolean>;
   resetPassword(nik: string): Promise<void>;
@@ -68,6 +71,7 @@ export class UserService implements IuserService {
         roleId: true,
         statusActive: true,
         handleWeb: true,
+        kpiAdmin: true,
         photo: true,
         departement: true,
         notificationPrefs: true,
@@ -80,18 +84,35 @@ export class UserService implements IuserService {
     }));
   }
 
+  async listDepartments(): Promise<string[]> {
+    const rows = await this.prismaService.dT_USER.findMany({
+      where: { departement: { not: null } },
+      distinct: ['departement'],
+      select: { departement: true },
+    });
+    return [...new Set(rows.map((row) => row.departement?.trim() ?? '').filter((name) => name.length > 0))].sort(
+      (a, b) => a.localeCompare(b, 'id'),
+    );
+  }
+
   async findAllPaginated(
     limit: number,
     offset: number,
     search?: string,
+    departement?: string,
   ): Promise<{ data: ResponseListUsersDto[]; total: number; hasMore: boolean }> {
     const whereClause: any = {};
+    const department = departement?.trim();
+    if (department) {
+      whereClause.departement = department;
+    }
     if (search && search.trim()) {
       const q = search.trim();
       whereClause.OR = [
         { nik: { contains: q } },
         { nama: { contains: q } },
         { email: { contains: q } },
+        { noTelp: { contains: q } },
         { departement: { contains: q } },
       ];
     }
@@ -111,6 +132,7 @@ export class UserService implements IuserService {
           roleId: true,
           statusActive: true,
           handleWeb: true,
+          kpiAdmin: true,
           photo: true,
           departement: true,
           notificationPrefs: true,
@@ -282,6 +304,7 @@ export class UserService implements IuserService {
           roleId: getRole.id,
           statusActive: data.statusActive,
           handleWeb: data.handleWeb,
+          kpiAdmin: getRole.id === 'HEAD' ? Boolean(data.kpiAdmin ?? existingUser.kpiAdmin) : false,
           ...(photoUpdate !== undefined ? { photo: photoUpdate } : {}),
           ...(deptUpdate !== undefined ? { departement: deptUpdate } : {}),
           ...(data.notificationPrefs !== undefined
@@ -503,4 +526,228 @@ export class UserService implements IuserService {
       this.prismaService.dT_USER.delete({ where: { nik } }),
     ]);
   }
+
+  async importWebUsers(): Promise<WebImportResult> {
+    await this.roleService.getOrSave(ERole.STAFF);
+    await this.roleService.getOrSave(ERole.HEAD);
+
+    const rows = await this.prismaService.$queryRaw<WebImportRow[]>`
+      SELECT
+        LTRIM(RTRIM(ISNULL(p.NomorIndukStr, ''))) AS nik,
+        LEFT(LTRIM(RTRIM(ISNULL(p.NamaLengkapStr, ''))), 40) AS nama,
+        LEFT(LTRIM(RTRIM(ISNULL(w.PHONE_NUMBER, ''))), 13) AS phone,
+        LTRIM(RTRIM(w.ROLL_CODE)) AS rollCode,
+        LEFT(LTRIM(RTRIM(ISNULL(dept.DepartemenStr, ''))), 50) AS departement,
+        ss.photoUrl AS photoUrl,
+        ph.photoImg AS photoImg,
+        CASE WHEN p.PegawaiIDLng IS NULL THEN 0 ELSE 1 END AS activeMatch
+      FROM pos_server.dbo.WEB_USER_MAIN w
+      LEFT JOIN hris.dbo.tblpegawai p
+        ON LTRIM(RTRIM(p.NomorIndukStr)) COLLATE DATABASE_DEFAULT = LTRIM(RTRIM(w.ID_USER)) COLLATE DATABASE_DEFAULT
+       AND ISNULL(p.PegawaiNonAktifInt, 0) = 0
+      OUTER APPLY (
+        SELECT TOP 1 td.DepartemenStr
+        FROM hris.dbo.tblpegawaijabatan tj
+        LEFT JOIN hris.dbo.tbldepartemen td ON tj.DepartemenIDLng = td.DepartemenIDLng
+        WHERE tj.PegawaiIDLng = p.PegawaiIDLng
+        ORDER BY tj.PegawaiJabatanIDLng DESC
+      ) dept
+      OUTER APPLY (
+        SELECT TOP 1 ph.PhotoImg AS photoImg
+        FROM hris.dbo.tblpegawaiphoto ph
+        WHERE ph.PegawaiIDLng = p.PegawaiIDLng
+          AND DATALENGTH(ph.PhotoImg) > 32
+          AND DATALENGTH(ph.PhotoImg) <= 2000000
+        ORDER BY ph.PegawaiPhotoIDLng DESC
+      ) ph
+      OUTER APPLY (
+        SELECT TOP 1 LTRIM(RTRIM(ss.Photo)) AS photoUrl
+        FROM hris.dbo.WEB_SELF_SERVICE_PHOTO_PEGAWAI ss
+        WHERE LTRIM(RTRIM(ss.NIK)) COLLATE DATABASE_DEFAULT = LTRIM(RTRIM(p.NomorIndukStr)) COLLATE DATABASE_DEFAULT
+          AND LTRIM(RTRIM(ISNULL(ss.Photo, ''))) <> ''
+        ORDER BY ss.id DESC
+      ) ss
+      WHERE w.ROLL_CODE IN ('1313', '8877', '7788')
+        AND w.ID_USER NOT LIKE 'gh%'
+    `;
+
+    const existing = await this.prismaService.dT_USER.findMany({ select: { nik: true } });
+    const existingNiks = new Set(existing.map((user) => user.nik.trim()));
+    const queued = new Set<string>();
+    const result: WebImportResult = {
+      inserted: 0,
+      skippedExisting: 0,
+      skippedInactiveOrMissing: 0,
+      skippedBadNik: 0,
+      photoSaved: 0,
+      photoMissing: 0,
+      failed: 0,
+    };
+
+    for (const row of rows) {
+      const active = Number(row.activeMatch) === 1;
+      const nik = (row.nik || '').trim();
+      const nama = (row.nama || '').trim();
+      if (!active) {
+        result.skippedInactiveOrMissing += 1;
+        continue;
+      }
+      if (nik.length !== 8 || !nama) {
+        result.skippedBadNik += 1;
+        continue;
+      }
+      if (existingNiks.has(nik) || queued.has(nik)) {
+        result.skippedExisting += 1;
+        continue;
+      }
+      queued.add(nik);
+
+      const roleId = row.rollCode === '8877' || row.rollCode === '7788' ? ERole.HEAD : ERole.STAFF;
+      let photo = generateColorFromString(nama);
+      let savedPhoto = false;
+      try {
+        const uploaded = await this.photoForImport(nik, row.photoUrl, row.photoImg);
+        if (uploaded) {
+          photo = uploaded;
+          savedPhoto = true;
+        }
+      } catch {
+        savedPhoto = false;
+      }
+
+      try {
+        await this.prismaService.dT_USER.create({
+          data: {
+            nik,
+            nama,
+            password: encodePassword('ArahTimurLaut12'),
+            noTelp: row.phone?.trim() ? row.phone.trim() : null,
+            email: null,
+            roleId,
+            statusActive: true,
+            handleWeb: false,
+            photo,
+            departement: row.departement?.trim() ? row.departement.trim() : null,
+            mustChangePassword: true,
+          },
+        });
+        result.inserted += 1;
+        if (savedPhoto) result.photoSaved += 1;
+        else result.photoMissing += 1;
+      } catch {
+        result.failed += 1;
+      }
+    }
+
+    const filled = await this.syncSelfServicePhotos();
+    result.photoSaved += filled;
+    result.photoMissing = Math.max(0, result.photoMissing - filled);
+
+    return result;
+  }
+
+  async syncSelfServicePhotos(): Promise<number> {
+    const photos = await this.prismaService.$queryRaw<{ nik: string; photo: string }[]>`
+      SELECT
+        u.nik AS nik,
+        LTRIM(RTRIM(ss.Photo)) AS photo
+      FROM DT_USER u
+      INNER JOIN hris.dbo.WEB_SELF_SERVICE_PHOTO_PEGAWAI ss
+        ON LTRIM(RTRIM(ss.NIK)) COLLATE DATABASE_DEFAULT = LTRIM(RTRIM(u.nik)) COLLATE DATABASE_DEFAULT
+      WHERE LTRIM(RTRIM(ISNULL(ss.Photo, ''))) <> ''
+        AND (
+          u.photo IS NULL
+          OR LTRIM(RTRIM(u.photo)) = ''
+          OR u.photo NOT LIKE 'https://web.amscorp.id:3060/ImageProfile/%'
+        )
+    `;
+
+    let filled = 0;
+    for (const row of photos) {
+      const nik = row.nik?.trim();
+      const url = profileImageUrl(row.photo);
+      if (!nik || !url) continue;
+      if (url.length > 500) {
+        console.warn(`photo url too long for ${nik}: ${url.length}`);
+        continue;
+      }
+      await this.prismaService.dT_USER.update({
+        where: { nik },
+        data: { photo: url },
+      });
+      filled += 1;
+    }
+    return filled;
+  }
+
+  private async photoForImport(
+    nik: string,
+    photoUrl: string | null,
+    photoImg: Buffer | Uint8Array | null,
+  ): Promise<string | null> {
+    const url = profileImageUrl(photoUrl);
+    if (url && url.length <= 500) return url;
+
+    const buffer = toBuffer(photoImg);
+    const image = buffer ? sniffImage(buffer) : null;
+    if (!buffer || !image || buffer.length > 2 * 1024 * 1024) return null;
+
+    const uploaded = await this.storageService.uploadFile(
+      safeUserPhotoPath(`avatar.${image.ext}`, nik),
+      buffer,
+      image.mime,
+    );
+    return uploaded.url;
+  }
+}
+
+type WebImportRow = {
+  nik: string;
+  nama: string;
+  phone: string | null;
+  rollCode: string;
+  departement: string | null;
+  photoUrl: string | null;
+  photoImg: Buffer | Uint8Array | null;
+  activeMatch: number;
+};
+
+export type WebImportResult = {
+  inserted: number;
+  skippedExisting: number;
+  skippedInactiveOrMissing: number;
+  skippedBadNik: number;
+  photoSaved: number;
+  photoMissing: number;
+  failed: number;
+};
+
+function toBuffer(value: Buffer | Uint8Array | null): Buffer | null {
+  if (!value) return null;
+  if (Buffer.isBuffer(value)) return value;
+  if (value instanceof Uint8Array) return Buffer.from(value);
+  return null;
+}
+
+function sniffImage(buffer: Buffer): { mime: string; ext: string } | null {
+  if (buffer.length > 3 && buffer[0] === 0xff && buffer[1] === 0xd8) {
+    return { mime: 'image/jpeg', ext: 'jpg' };
+  }
+  if (buffer.length > 8 && buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e) {
+    return { mime: 'image/png', ext: 'png' };
+  }
+  if (buffer.subarray(0, 3).toString('ascii') === 'GIF') {
+    return { mime: 'image/gif', ext: 'gif' };
+  }
+  if (buffer.length > 2 && buffer[0] === 0x42 && buffer[1] === 0x4d) {
+    return { mime: 'image/bmp', ext: 'bmp' };
+  }
+  if (
+    buffer.length > 12 &&
+    buffer.subarray(0, 4).toString('ascii') === 'RIFF' &&
+    buffer.subarray(8, 12).toString('ascii') === 'WEBP'
+  ) {
+    return { mime: 'image/webp', ext: 'webp' };
+  }
+  return null;
 }

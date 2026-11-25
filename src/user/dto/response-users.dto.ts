@@ -6,6 +6,7 @@ export class ResponseListUsersDto {
   roleId: string;
   statusActive: boolean;
   handleWeb: boolean;
+  kpiAdmin?: boolean;
   photo: string | null;
   departement?: string | null;
   departemen?: string | null;

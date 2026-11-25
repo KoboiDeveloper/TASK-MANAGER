@@ -20,6 +20,9 @@ import { AuthGuard } from '../security/authGuard';
 import { DT_USER } from '@prisma/client';
 import { ForgotPwRequest } from './dto/request/forgotPwRequest';
 import { ResetPwRequest } from './dto/request/resetPwRequest';
+import { SetupEmailRequest } from './dto/request/setupEmailRequest';
+import { SetupOtpRequest } from './dto/request/setupOtpRequest';
+import { SetupPasswordRequest } from './dto/request/setupPasswordRequest';
 import { handleException } from '../utils/handleException';
 
 @Controller('api/auth')
@@ -193,6 +196,55 @@ export class AuthController {
       token,
       expiresIn: 900,
     });
+  }
+
+  @UseGuards(AuthGuard)
+  @Post('setup/email')
+  @HttpCode(HttpStatus.OK)
+  async setupEmail(@Req() request: Request, @Body() body: SetupEmailRequest) {
+    try {
+      const user = request['user'] as { nik: string };
+      const result = await this.authService.sendSetupEmail(user.nik, body.email);
+      return new CommonResponse(result, HttpStatus.OK, result);
+    } catch ({ message }) {
+      return handleException(message as string);
+    }
+  }
+
+  @UseGuards(AuthGuard)
+  @Post('setup/verify-otp')
+  @HttpCode(HttpStatus.OK)
+  async setupVerifyOtp(
+    @Req() request: Request,
+    @Body() body: SetupOtpRequest,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    try {
+      const user = request['user'] as { nik: string };
+      const result = await this.authService.verifySetupOtp(user.nik, body.otp);
+      this.setAuthCookies(res, result);
+      return new CommonResponse('Email terverifikasi', HttpStatus.OK, result);
+    } catch ({ message }) {
+      return handleException(message as string);
+    }
+  }
+
+  @UseGuards(AuthGuard)
+  @Post('setup/password')
+  @HttpCode(HttpStatus.OK)
+  async setupPassword(
+    @Req() request: Request,
+    @Body() body: SetupPasswordRequest,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    try {
+      const user = request['user'] as { nik: string };
+      const result = await this.authService.completeSetupPassword(user.nik, body.password);
+      this.setAuthCookies(res, result);
+      return new CommonResponse('Password diperbarui', HttpStatus.OK, result);
+    } catch ({ message }) {
+      return handleException(message as string);
+    }
   }
 
   @Post('forgot-password')

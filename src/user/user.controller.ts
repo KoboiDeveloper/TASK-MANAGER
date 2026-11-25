@@ -55,12 +55,24 @@ export class UserController {
   }
 
   @Roles('SUPER')
+  @Get('/departments')
+  async departments() {
+    try {
+      const data = await this.userService.listDepartments();
+      return new CommonResponse('Departments', HttpStatus.OK, data);
+    } catch ({ message }) {
+      return handleException(message as string);
+    }
+  }
+
+  @Roles('SUPER')
   @Get()
   async findAll(
     @Query('limit') limit?: string,
     @Query('offset') offset?: string,
     @Query('page') page?: string,
     @Query('search') search?: string,
+    @Query('departement') departement?: string,
   ) {
     try {
       if (limit !== undefined || offset !== undefined || page !== undefined) {
@@ -70,7 +82,7 @@ export class UserController {
           const pageNum = Math.max(Number(page) || 1, 1);
           offsetNum = (pageNum - 1) * limitNum;
         }
-        const result = await this.userService.findAllPaginated(limitNum, offsetNum, search);
+        const result = await this.userService.findAllPaginated(limitNum, offsetNum, search, departement);
         return new CommonResponse('Users List', HttpStatus.OK, result);
       }
 

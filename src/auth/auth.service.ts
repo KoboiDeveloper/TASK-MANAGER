@@ -26,6 +26,7 @@ export interface JwtPayload {
   nama: string;
   roleId: string;
   type?: 'access' | 'ws';
+  setup?: 'email' | 'password';
 }
 
 export interface RefreshTokenPayload {
@@ -34,6 +35,16 @@ export interface RefreshTokenPayload {
   jti: string;
   family: string;
   type: 'refresh';
+  setup?: 'email' | 'password';
+}
+
+export function accountSetup(user: {
+  email: string | null;
+  mustChangePassword: boolean;
+}): 'email' | 'password' | null {
+  if (!user.email?.trim()) return 'email';
+  if (user.mustChangePassword) return 'password';
+  return null;
 }
 
 export interface IAuthService {
@@ -144,6 +155,8 @@ export class AuthService implements IAuthService {
       nik: string;
       nama: string;
       roleId: string;
+      email: string | null;
+      mustChangePassword: boolean;
     },
     familyId?: string,
     loginMeta?: { userAgent?: string },
@@ -187,11 +200,13 @@ export class AuthService implements IAuthService {
       });
     }
 
+    const setup = accountSetup(user);
     const accessPayload: JwtPayload = {
       nik: user.nik,
       nama: user.nama,
       roleId: user.roleId,
       type: 'access',
+      ...(setup ? { setup } : {}),
     };
 
     const refreshPayload: RefreshTokenPayload = {
@@ -200,6 +215,7 @@ export class AuthService implements IAuthService {
       jti: jti,
       family: family,
       type: 'refresh',
+      ...(setup ? { setup } : {}),
     };
 
     const [token, refreshToken] = await Promise.all([
@@ -215,7 +231,7 @@ export class AuthService implements IAuthService {
       }),
     ]);
 
-    return { token, refreshToken };
+    return { token, refreshToken, setupStep: setup };
   }
 
   async validateUser(data: LoginRequest, userAgent?: string): Promise<LoginResponse> {
@@ -237,6 +253,8 @@ export class AuthService implements IAuthService {
         nik: user.nik,
         nama: user.nama,
         roleId: user.roleId,
+        email: user.email,
+        mustChangePassword: user.mustChangePassword,
       },
       undefined,
       { userAgent },
@@ -297,11 +315,13 @@ export class AuthService implements IAuthService {
             throw new UnauthorizedException('User is inactive or not found');
           }
 
+          const setup = accountSetup(user);
           const accessPayload: JwtPayload = {
             nik: user.nik,
             nama: user.nama,
             roleId: user.roleId,
             type: 'access',
+            ...(setup ? { setup } : {}),
           };
 
           const refreshPayload: RefreshTokenPayload = {
@@ -310,6 +330,7 @@ export class AuthService implements IAuthService {
             jti: latestToken.id,
             family: latestToken.family,
             type: 'refresh',
+            ...(setup ? { setup } : {}),
           };
 
           const [token, activeRefreshToken] = await Promise.all([
@@ -325,7 +346,7 @@ export class AuthService implements IAuthService {
             }),
           ]);
 
-          return { token, refreshToken: activeRefreshToken };
+          return { token, refreshToken: activeRefreshToken, setupStep: setup };
         }
       }
 
@@ -388,11 +409,13 @@ export class AuthService implements IAuthService {
       }),
     ]);
 
+    const setup = accountSetup(user);
     const accessPayload: JwtPayload = {
       nik: user.nik,
       nama: user.nama,
       roleId: user.roleId,
       type: 'access',
+      ...(setup ? { setup } : {}),
     };
 
     const refreshPayload: RefreshTokenPayload = {
@@ -401,6 +424,7 @@ export class AuthService implements IAuthService {
       jti: newJti,
       family: tokenRecord.family,
       type: 'refresh',
+      ...(setup ? { setup } : {}),
     };
 
     const [token, newRefreshToken] = await Promise.all([
@@ -416,7 +440,7 @@ export class AuthService implements IAuthService {
       }),
     ]);
 
-    return { token, refreshToken: newRefreshToken };
+    return { token, refreshToken: newRefreshToken, setupStep: setup };
   }
 
   async revokeToken(refreshToken: string): Promise<void> {
@@ -473,7 +497,12 @@ export class AuthService implements IAuthService {
   async resetPw({ otp, newPassword }: ResetPwRequest): Promise<string> {
     const whorequest = await this.prismaService.lOG_FORGOT_PASSWORD.findUnique({ where: { otp } });
 
-    if (!whorequest || whorequest.used || new Date() > new Date(whorequest.expiresAt)) {
+    if (
+      !whorequest ||
+      whorequest.used ||
+      whorequest.purpose === 'setup' ||
+      new Date() > new Date(whorequest.expiresAt)
+    ) {
       throw new BadRequestException('OTP is invalid or expired');
     }
 
@@ -507,6 +536,8 @@ export class AuthService implements IAuthService {
           nama: true,
           roleId: true,
           photo: true,
+          email: true,
+          mustChangePassword: true,
           memberProjects: {
             orderBy: { projectId: 'asc' },
             select: {
@@ -533,6 +564,8 @@ export class AuthService implements IAuthService {
         nama: dbUser.nama,
         roleId: dbUser.roleId,
         photo: dbUser.photo,
+        email: dbUser.email,
+        setupStep: accountSetup(dbUser),
         memberProjects: dbUser.memberProjects.map((mp) => ({
           projectId: mp.project?.shortId || mp.projectId,
           name: mp.project.name,
@@ -544,5 +577,101 @@ export class AuthService implements IAuthService {
       if (e instanceof HttpException) throw e;
       throw new InternalServerErrorException(e);
     }
+  }
+
+  async sendSetupEmail(nik: string, email: string): Promise<string> {
+    const normalized = email.trim().toLowerCase();
+    const user = await this.prismaService.dT_USER.findUnique({ where: { nik } });
+    if (!user) throw new NotFoundException('User not found');
+    if (accountSetup(user) !== 'email') {
+      throw new BadRequestException('Email sudah terisi');
+    }
+
+    const taken = await this.prismaService.dT_USER.findFirst({
+      where: { email: normalized, NOT: { nik } },
+    });
+    if (taken) throw new BadRequestException('Email sudah dipakai');
+
+    await this.prismaService.lOG_FORGOT_PASSWORD.updateMany({
+      where: { nik, purpose: 'setup', used: false },
+      data: { used: true },
+    });
+
+    const otp = await this.createUniqueOtp();
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+    await this.prismaService.$transaction([
+      this.prismaService.dT_USER.update({
+        where: { nik },
+        data: { pendingEmail: normalized },
+      }),
+      this.prismaService.lOG_FORGOT_PASSWORD.create({
+        data: { otp, nik, expiresAt, purpose: 'setup' },
+      }),
+    ]);
+    try {
+      await this.mailService.sendSetupOtpEmail(normalized, otp);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      if (detail.includes('unrecognised IP') || detail.includes('authorised_ips')) {
+        throw new BadRequestException('Email gagal terkirim. IP pengirim belum diizinkan di Brevo.');
+      }
+      throw new BadRequestException('Email gagal terkirim. Coba lagi.');
+    }
+    return 'Kode verifikasi dikirim';
+  }
+
+  async verifySetupOtp(nik: string, otp: string): Promise<LoginResponse> {
+    const row = await this.prismaService.lOG_FORGOT_PASSWORD.findUnique({ where: { otp } });
+    const user = await this.prismaService.dT_USER.findUnique({ where: { nik } });
+    if (
+      !user ||
+      !row ||
+      row.used ||
+      row.purpose !== 'setup' ||
+      row.nik !== nik ||
+      new Date() > new Date(row.expiresAt) ||
+      !user.pendingEmail
+    ) {
+      throw new BadRequestException('OTP is invalid or expired');
+    }
+
+    const updated = await this.prismaService.$transaction(async (tx) => {
+      await tx.lOG_FORGOT_PASSWORD.update({ where: { otp }, data: { used: true } });
+      return tx.dT_USER.update({
+        where: { nik },
+        data: { email: user.pendingEmail, pendingEmail: null },
+      });
+    });
+
+    return this.generateTokens(updated);
+  }
+
+  async completeSetupPassword(nik: string, newPassword: string): Promise<LoginResponse> {
+    const user = await this.prismaService.dT_USER.findUnique({ where: { nik } });
+    if (!user || accountSetup(user) !== 'password') {
+      throw new BadRequestException('Password belum bisa diganti');
+    }
+    if (newPassword === 'ArahTimurLaut12') {
+      throw new BadRequestException('Pakai password yang baru');
+    }
+
+    const password = encodePassword(newPassword);
+    const updated = await this.prismaService.dT_USER.update({
+      where: { nik },
+      data: { password, mustChangePassword: false },
+    });
+    if (updated.email) {
+      this.mailService.sendPasswordChangedEmail(updated.email, updated.nama);
+    }
+    return this.generateTokens(updated);
+  }
+
+  private async createUniqueOtp(): Promise<string> {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+      const existing = await this.prismaService.lOG_FORGOT_PASSWORD.findUnique({ where: { otp } });
+      if (!existing) return otp;
+    }
+    throw new InternalServerErrorException('Gagal membuat OTP');
   }
 }

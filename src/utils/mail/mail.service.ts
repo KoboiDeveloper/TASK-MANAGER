@@ -176,6 +176,28 @@ export class MailService implements OnModuleInit {
   // 🔹 RESET PASSWORD
   // =========================================================
 
+  async sendSetupOtpEmail(to: string, otp: string): Promise<void> {
+    const htmlContent = `
+  <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden;">
+    <div style="background-color: #082988; padding: 20px; color: white;">
+      <h2 style="margin: 0;">Verifikasi email</h2>
+    </div>
+    <div style="padding: 20px;">
+      <p>Gunakan kode ini untuk menghubungkan email ke akun AMS Workspace:</p>
+      <div style="background-color: #f4f4f4; padding: 16px; text-align: center; font-size: 24px; font-weight: bold; letter-spacing: 2px; border-radius: 6px; margin: 16px 0;">
+        ${otp}
+      </div>
+      <p>Kode ini berlaku <strong>15 menit</strong>.</p>
+    </div>
+  </div>
+  `;
+    await this.deliver({
+      to,
+      subject: 'Kode verifikasi AMS Workspace',
+      html: htmlContent,
+    });
+  }
+
   /** Kirim email reset password (OTP + link) */
   async sendResetPasswordEmail(to: string, token: string, otp: string): Promise<void> {
     const resetUrl = `${this.domain}/reset-password?verifylink=${encodeURIComponent(token)}`;

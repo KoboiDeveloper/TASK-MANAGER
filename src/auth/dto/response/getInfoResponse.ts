@@ -10,5 +10,7 @@ export class GetInfoUserResponse {
   nama: string;
   roleId: string;
   photo: string | null;
+  email: string | null;
+  setupStep: 'email' | 'password' | null;
   memberProjects: MemberProjects[];
 }

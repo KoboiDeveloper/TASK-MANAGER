@@ -54,6 +54,14 @@ export class RequestUpdateUser {
   @IsBoolean()
   handleWeb: boolean;
 
+  @IsOptional()
+  @Transform(({ value }: { value: unknown }): boolean | undefined => {
+    if (value === undefined || value === null || value === '') return undefined;
+    return typeof value === 'string' ? value.toLowerCase() === 'true' : Boolean(value);
+  })
+  @IsBoolean()
+  kpiAdmin?: boolean;
+
   @IsNotEmpty({ message: 'Role tidak boleh kosong' })
   @IsEnum(ERole, { message: 'Role tidak valid' })
   roleId: ERole;

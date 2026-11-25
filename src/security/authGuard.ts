@@ -1,4 +1,10 @@
-import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
+import {
+  CanActivate,
+  ExecutionContext,
+  ForbiddenException,
+  Injectable,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { Request } from 'express';
 import { ConfigService } from '@nestjs/config';
@@ -51,13 +57,30 @@ export class AuthGuard implements CanActivate {
     }
     const userInDb = await this.prismaService.dT_USER.findUnique({
       where: { nik: request.user.nik },
-      select: { statusActive: true },
+      select: { statusActive: true, email: true, mustChangePassword: true },
     });
     if (!userInDb?.statusActive) {
       throw new SuspendedUserException();
     }
 
+    const needsSetup = !userInDb.email?.trim() || userInDb.mustChangePassword;
+    if (needsSetup && !this.isSetupAllowed(request)) {
+      throw new ForbiddenException('Setup required');
+    }
+
     return true;
+  }
+
+  private isSetupAllowed(request: Request): boolean {
+    const path = (request.path || request.url || '').split('?')[0].replace(/\/+$/, '');
+    return (
+      path === '/api/auth/user-info' ||
+      path === '/api/auth/logout' ||
+      path === '/api/auth/refresh' ||
+      path === '/api/auth/setup/email' ||
+      path === '/api/auth/setup/verify-otp' ||
+      path === '/api/auth/setup/password'
+    );
   }
   private extractToken(request: Request): string | undefined {
     const cookies = request.cookies as Record<string, string>;
