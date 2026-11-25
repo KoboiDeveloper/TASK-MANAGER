@@ -72,15 +72,17 @@ export class AuthGuard implements CanActivate {
   }
 
   private isSetupAllowed(request: Request): boolean {
-    const path = (request.path || request.url || '').split('?')[0].replace(/\/+$/, '');
-    return (
-      path === '/api/auth/user-info' ||
-      path === '/api/auth/logout' ||
-      path === '/api/auth/refresh' ||
-      path === '/api/auth/setup/email' ||
-      path === '/api/auth/setup/verify-otp' ||
-      path === '/api/auth/setup/password'
-    );
+    const raw = request.originalUrl || request.url || request.path || '';
+    const path = raw.split('?')[0].replace(/\/+$/, '');
+    const allowed = [
+      '/api/auth/user-info',
+      '/api/auth/logout',
+      '/api/auth/refresh',
+      '/api/auth/setup/email',
+      '/api/auth/setup/verify-otp',
+      '/api/auth/setup/password',
+    ];
+    return allowed.some((item) => path === item || path.endsWith(item));
   }
   private extractToken(request: Request): string | undefined {
     const cookies = request.cookies as Record<string, string>;
