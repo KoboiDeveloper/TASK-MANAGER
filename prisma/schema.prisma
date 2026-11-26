@@ -736,6 +736,7 @@ model DT_KPI_TARGET {
   kpi         DT_KPI         @relation(fields: [kpiId], references: [id], onDelete: Cascade, onUpdate: NoAction)
   method      DT_KPI_METHOD? @relation(fields: [methodId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   entries     DT_KPI_ENTRY[]
+  reopens     DT_KPI_REOPEN[]
 
   @@index([kpiId])
   @@index([methodId])
@@ -764,11 +765,30 @@ model DT_KPI_ENTRY_FILE {
   filename   String       @db.NVarChar(255)
   mimeType   String       @db.VarChar(100)
   bytes      Int
+  kind       String       @default("task") @db.VarChar(20)
   uploadedBy String       @db.Char(8)
   uploadedAt DateTime     @default(now())
   entry      DT_KPI_ENTRY @relation(fields: [entryId], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
   @@index([entryId])
+}
+
+model DT_KPI_REOPEN {
+  id          String        @id @default(uuid()) @db.UniqueIdentifier
+  targetId    String        @db.UniqueIdentifier
+  nik         String        @db.Char(8)
+  month       String        @db.Char(7)
+  baUrl       String        @db.NVarChar(2000)
+  baFilename  String        @db.NVarChar(255)
+  mimeType    String        @db.VarChar(100)
+  bytes       Int
+  status      String        @default("pending") @db.VarChar(20)
+  requestedAt DateTime      @default(now())
+  decidedAt   DateTime?
+  decidedBy   String?       @db.Char(8)
+  target      DT_KPI_TARGET @relation(fields: [targetId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([targetId, nik, month])
 }
 
 model DT_KPI_LOG {

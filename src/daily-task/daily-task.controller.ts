@@ -197,6 +197,81 @@ export class DailyTaskController {
     }
   }
 
+  @Post('targets/:targetId/files/extra')
+  @UseInterceptors(
+    FileFieldsInterceptor([{ name: 'files', maxCount: 10 }], {
+      storage: multer.memoryStorage(),
+      limits: { fileSize: 15 * 1024 * 1024 },
+    }),
+  )
+  async extraFiles(
+    @Req() request: AuthRequest,
+    @Param('targetId') targetId: string,
+    @Body() body: { departmentId: string; nik: string; month: string },
+    @UploadedFiles() uploaded?: { files?: Express.Multer.File[] },
+  ) {
+    try {
+      const data = await this.kpiService.submitExtraFiles(
+        this.actor(request),
+        body.departmentId,
+        targetId,
+        body.nik,
+        body.month,
+        uploaded?.files ?? [],
+      );
+      return new CommonResponse('File tambahan disimpan', HttpStatus.OK, data);
+    } catch (error) {
+      return handleException(error);
+    }
+  }
+
+  @Post('targets/:targetId/reopen')
+  @UseInterceptors(
+    FileFieldsInterceptor([{ name: 'file', maxCount: 1 }], {
+      storage: multer.memoryStorage(),
+      limits: { fileSize: 15 * 1024 * 1024 },
+    }),
+  )
+  async reopen(
+    @Req() request: AuthRequest,
+    @Param('targetId') targetId: string,
+    @Body() body: { departmentId: string; nik: string; month: string },
+    @UploadedFiles() uploaded?: { file?: Express.Multer.File[] },
+  ) {
+    try {
+      const data = await this.kpiService.requestReopen(
+        this.actor(request),
+        body.departmentId,
+        targetId,
+        body.nik,
+        body.month,
+        uploaded?.file?.[0],
+      );
+      return new CommonResponse('Permohonan pembukaan dikirim', HttpStatus.OK, data);
+    } catch (error) {
+      return handleException(error);
+    }
+  }
+
+  @Post('targets/:targetId/reopen/:reopenId')
+  async decide(
+    @Req() request: AuthRequest,
+    @Param('reopenId') reopenId: string,
+    @Body() body: { departmentId: string; decision: string },
+  ) {
+    try {
+      const data = await this.kpiService.decideReopen(
+        this.actor(request),
+        body.departmentId,
+        reopenId,
+        body.decision,
+      );
+      return new CommonResponse('Keputusan disimpan', HttpStatus.OK, data);
+    } catch (error) {
+      return handleException(error);
+    }
+  }
+
   @Post('targets/:targetId/files')
   @UseInterceptors(
     FileFieldsInterceptor([{ name: 'files', maxCount: 10 }], {

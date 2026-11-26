@@ -170,12 +170,22 @@ export class DailyTaskKpiService implements OnModuleInit {
     const owned = await this.ownsTemplate(employeeNik);
     const kpis = await this.loadKpis(owned ? null : departmentKey, owned ? employeeNik : null, month);
     const targetIds = kpis.flatMap((kpi) => kpi.targets.map((target) => target.id));
-    const entries = targetIds.length
-      ? await this.prisma.dT_KPI_ENTRY.findMany({
-          where: { nik: employeeNik, month, targetId: { in: targetIds } },
-          include: { files: { orderBy: { uploadedAt: 'asc' } } },
-        })
-      : [];
+    const [entries, reopens] = targetIds.length
+      ? await Promise.all([
+          this.prisma.dT_KPI_ENTRY.findMany({
+            where: { nik: employeeNik, month, targetId: { in: targetIds } },
+            include: { files: { orderBy: { uploadedAt: 'asc' } } },
+          }),
+          this.prisma.dT_KPI_REOPEN.findMany({
+            where: { nik: employeeNik, month, targetId: { in: targetIds } },
+            orderBy: { requestedAt: 'desc' },
+          }),
+        ])
+      : [[], []];
+    const latestReopen = new Map<string, (typeof reopens)[number]>();
+    for (const row of reopens) {
+      if (!latestReopen.has(row.targetId)) latestReopen.set(row.targetId, row);
+    }
     const byTarget = Object.fromEntries(
       entries.map((entry) => [
         entry.targetId,
@@ -184,19 +194,14 @@ export class DailyTaskKpiService implements OnModuleInit {
           submittedAt: entry.submittedAt?.toISOString() ?? null,
           note: entry.note,
           workStatus: this.workStatusOf(entry.workStatus),
-          files: entry.files.map((file) => ({
-            id: file.id,
-            name: file.filename,
-            type: file.mimeType,
-            size: file.bytes,
-            url: file.url,
-          })),
+          files: entry.files.map((file) => this.presentFile(file)),
         },
       ]),
     );
     return {
       kpis,
       entries: byTarget,
+      reopens: Object.fromEntries([...latestReopen].map(([id, row]) => [id, this.presentReopen(row)])),
       canSubmitRealisasi: await this.isHeadOf(actorNik, departmentKey),
       canUploadFiles: actorNik.trim() === employeeNik,
       canEditKpi: this.mayEditKpi(profile, departmentKey),
@@ -410,12 +415,16 @@ export class DailyTaskKpiService implements OnModuleInit {
       throw new BadRequestException('Status hanya bisa Belum dikerjakan atau Sedang dikerjakan');
     }
     const nextStatus: WorkStatus = status === 'doing' ? 'doing' : 'todo';
-    await this.assertTarget(targetId);
+    const target = await this.assertTarget(targetId);
+    const reopened = await this.isReopened(targetId, nik, month);
+    if (this.isPastDue(this.dueLabel(month, target.dueDay, target.dueMonth, target.dueDate)) && !reopened) {
+      throw new BadRequestException('Due date target sudah lewat');
+    }
     const saved = await this.prisma.$transaction(async (tx) => {
       const before = await tx.dT_KPI_ENTRY.findUnique({
         where: { targetId_nik_month: { targetId, nik, month } },
       });
-      if (before?.workStatus === 'done') {
+      if (before?.workStatus === 'done' && !reopened) {
         throw new BadRequestException('Target yang sudah selesai tidak bisa diubah statusnya');
       }
       if ((before?.workStatus ?? 'todo') === nextStatus) return { row: before, changed: false };
@@ -472,8 +481,18 @@ export class DailyTaskKpiService implements OnModuleInit {
     const trimmed = note?.trim() ?? '';
     if (!trimmed && files.length === 0) throw new BadRequestException('Isi keterangan atau lampirkan file');
     const target = await this.assertTarget(targetId);
-    if (this.isPastDue(this.dueLabel(month, target.dueDay, target.dueMonth, target.dueDate))) {
+    if (
+      this.isPastDue(this.dueLabel(month, target.dueDay, target.dueMonth, target.dueDate)) &&
+      !(await this.isReopened(targetId, nik, month))
+    ) {
       throw new BadRequestException('Due date target sudah lewat');
+    }
+    const current = await this.prisma.dT_KPI_ENTRY.findUnique({
+      where: { targetId_nik_month: { targetId, nik, month } },
+      select: { workStatus: true },
+    });
+    if (current?.workStatus !== 'doing') {
+      throw new BadRequestException('Ubah status menjadi Sedang dikerjakan sebelum submit');
     }
     const uploaded: { url: string; filename: string; mimeType: string; bytes: number }[] = [];
     for (const file of files) {
@@ -505,7 +524,7 @@ export class DailyTaskKpiService implements OnModuleInit {
       });
       if (uploaded.length) {
         await tx.dT_KPI_ENTRY_FILE.createMany({
-          data: uploaded.map((file) => ({ ...file, entryId: entry.id, uploadedBy: actorNik })),
+          data: uploaded.map((file) => ({ ...file, entryId: entry.id, uploadedBy: actorNik, kind: 'task' })),
         });
       }
       const after = await tx.dT_KPI_ENTRY.findUnique({
@@ -541,14 +560,147 @@ export class DailyTaskKpiService implements OnModuleInit {
     return {
       note: saved?.note ?? null,
       workStatus: 'done' as const,
-      files: (saved?.files ?? []).map((file) => ({
-        id: file.id,
-        name: file.filename,
-        type: file.mimeType,
-        size: file.bytes,
-        url: file.url,
-      })),
+      files: (saved?.files ?? []).map((file) => this.presentFile(file)),
     };
+  }
+
+  async submitExtraFiles(
+    actorNik: string,
+    departmentId: string,
+    targetId: string,
+    employeeNik: string,
+    month: string,
+    files: Express.Multer.File[],
+  ) {
+    this.assertMonth(month);
+    const nik = this.assertNik(employeeNik);
+    if (actorNik.trim() !== nik) {
+      throw new ForbiddenException('Hanya karyawan yang bersangkutan yang bisa menambah file');
+    }
+    if (!files.length) throw new BadRequestException('Lampirkan file tambahan');
+    await this.assertTarget(targetId);
+    const entry = await this.prisma.dT_KPI_ENTRY.findUnique({
+      where: { targetId_nik_month: { targetId, nik, month } },
+    });
+    if (entry?.workStatus !== 'done') {
+      throw new BadRequestException('File tambahan hanya bisa ditambah setelah target selesai');
+    }
+    const uploaded = await this.storeUploads(nik, month, files);
+    const saved = await this.prisma.$transaction(async (tx) => {
+      await tx.dT_KPI_ENTRY_FILE.createMany({
+        data: uploaded.map((file) => ({ ...file, entryId: entry.id, uploadedBy: actorNik, kind: 'extra' })),
+      });
+      const after = await tx.dT_KPI_ENTRY.findUnique({
+        where: { id: entry.id },
+        include: { files: true },
+      });
+      await this.writeLog(tx, {
+        actorNik,
+        subjectNik: nik,
+        departmentId,
+        month,
+        entityType: 'file',
+        entityId: entry.id,
+        action: 'extra',
+        summary: `Tambah ${uploaded.length} file tambahan`,
+        after,
+      });
+      return after;
+    });
+    const targetText = await this.targetText(targetId);
+    const name = await this.displayName(nik);
+    const heads = await this.headsOf(departmentId);
+    void this.notifyUsers(
+      heads.map((head) => head.nik),
+      nik,
+      'File tambahan KPI',
+      `${name} menambah file tambahan pada "${targetText}"`,
+      this.sheetPath(departmentId, nik),
+      'kpi.status',
+      heads,
+    );
+    return { files: (saved?.files ?? []).map((file) => this.presentFile(file)) };
+  }
+
+  async requestReopen(
+    actorNik: string,
+    departmentId: string,
+    targetId: string,
+    employeeNik: string,
+    month: string,
+    file: Express.Multer.File | undefined,
+  ) {
+    this.assertMonth(month);
+    const nik = this.assertNik(employeeNik);
+    if (actorNik.trim() !== nik) {
+      throw new ForbiddenException('Hanya karyawan yang bersangkutan yang bisa mengajukan pembukaan');
+    }
+    if (!file?.buffer?.length) throw new BadRequestException('Unggah BA terlebih dahulu');
+    const target = await this.assertTarget(targetId);
+    if (!this.isPastDue(this.dueLabel(month, target.dueDay, target.dueMonth, target.dueDate))) {
+      throw new BadRequestException('Target ini belum melewati due date');
+    }
+    const latest = await this.latestReopen(targetId, nik, month);
+    if (latest?.status === 'pending') throw new BadRequestException('Permohonan BA masih menunggu keputusan');
+    if (latest?.status === 'approved') throw new BadRequestException('Pembukaan upload sudah disetujui');
+    const [stored] = await this.storeUploads(nik, month, [file]);
+    const saved = await this.prisma.dT_KPI_REOPEN.create({
+      data: {
+        targetId,
+        nik,
+        month,
+        baUrl: stored.url,
+        baFilename: stored.filename,
+        mimeType: stored.mimeType,
+        bytes: stored.bytes,
+      },
+    });
+    const targetText = await this.targetText(targetId);
+    const name = await this.displayName(nik);
+    const heads = await this.headsOf(departmentId);
+    void this.notifyUsers(
+      heads.map((head) => head.nik),
+      nik,
+      'Permohonan pembukaan upload KPI',
+      `${name} mengajukan pembukaan upload "${targetText}"`,
+      this.sheetPath(departmentId, nik),
+      'kpi.status',
+      heads,
+    );
+    return this.presentReopen(saved);
+  }
+
+  async decideReopen(
+    actorNik: string,
+    departmentId: string,
+    reopenId: string,
+    decision: string,
+  ) {
+    if (decision !== 'approved' && decision !== 'rejected') {
+      throw new BadRequestException('Keputusan harus setujui atau tolak');
+    }
+    if (!(await this.isHeadOf(actorNik, departmentId))) {
+      throw new ForbiddenException('Hanya HEAD departemen ini yang bisa memutuskan permohonan');
+    }
+    const row = await this.prisma.dT_KPI_REOPEN.findUnique({ where: { id: reopenId } });
+    if (!row) throw new NotFoundException('Permohonan tidak ditemukan');
+    if (row.status !== 'pending') throw new BadRequestException('Permohonan ini sudah diputuskan');
+    const saved = await this.prisma.dT_KPI_REOPEN.update({
+      where: { id: reopenId },
+      data: { status: decision, decidedAt: new Date(), decidedBy: this.assertNik(actorNik) },
+    });
+    const targetText = await this.targetText(row.targetId);
+    const headName = await this.displayName(actorNik);
+    const verb = decision === 'approved' ? 'menyetujui' : 'menolak';
+    void this.notifyUsers(
+      [row.nik.trim()],
+      actorNik,
+      'Pembukaan upload KPI',
+      `${headName} ${verb} pembukaan upload "${targetText}"`,
+      this.sheetPath(departmentId, row.nik),
+      'kpi.realisasi',
+    );
+    return this.presentReopen(saved);
   }
 
   async logs(departmentId: string, nik: string | undefined, month: string) {
@@ -716,6 +868,85 @@ export class DailyTaskKpiService implements OnModuleInit {
     const target = await this.prisma.dT_KPI_TARGET.findUnique({ where: { id: targetId } });
     if (!target) throw new NotFoundException('Target tidak ditemukan');
     return target;
+  }
+
+  private presentFile(file: {
+    id: string;
+    filename: string;
+    mimeType: string;
+    bytes: number;
+    url: string;
+    kind?: string | null;
+    uploadedAt: Date;
+  }) {
+    return {
+      id: file.id,
+      name: file.filename,
+      type: file.mimeType,
+      size: file.bytes,
+      url: file.url,
+      kind: file.kind === 'extra' ? 'extra' as const : 'task' as const,
+      uploadedAt: file.uploadedAt.toISOString(),
+    };
+  }
+
+  private presentReopen(row: {
+    id: string;
+    status: string;
+    requestedAt: Date;
+    decidedAt: Date | null;
+    baUrl: string;
+    baFilename: string;
+    mimeType: string;
+    bytes: number;
+  }) {
+    return {
+      id: row.id,
+      status: row.status === 'approved' || row.status === 'rejected' ? row.status : 'pending',
+      requestedAt: row.requestedAt.toISOString(),
+      decidedAt: row.decidedAt?.toISOString() ?? null,
+      ba: {
+        name: row.baFilename,
+        type: row.mimeType,
+        size: row.bytes,
+        url: row.baUrl,
+      },
+    };
+  }
+
+  private async storeUploads(nik: string, month: string, files: Express.Multer.File[]) {
+    const uploaded: { url: string; filename: string; mimeType: string; bytes: number }[] = [];
+    for (const file of files) {
+      if (!file?.buffer?.length) continue;
+      if (file.size > 15 * 1024 * 1024) throw new BadRequestException('Maksimum ukuran file 15MB');
+      const filename = (file.originalname || 'file').slice(0, 255);
+      const safe = filename.replace(/[^\w.-]+/g, '_');
+      const stored = await this.storage.uploadFile(
+        `daily-task/${nik}/${month}/${Date.now()}_${safe}`,
+        file.buffer,
+        file.mimetype || 'application/octet-stream',
+      );
+      uploaded.push({
+        url: stored.url,
+        filename,
+        mimeType: file.mimetype || 'application/octet-stream',
+        bytes: file.size,
+      });
+    }
+    if (uploaded.length === 0) throw new BadRequestException('Lampirkan file');
+    return uploaded;
+  }
+
+  private async latestReopen(targetId: string, nik: string, month: string) {
+    return this.prisma.dT_KPI_REOPEN.findFirst({
+      where: { targetId, nik, month },
+      orderBy: { requestedAt: 'desc' },
+    });
+  }
+
+  private async isReopened(targetId: string, nik: string, month: string) {
+    const latest = await this.latestReopen(targetId, nik, month);
+    return latest?.status === 'approved';
   }
 
   private isPastDue(label: string | null) {
