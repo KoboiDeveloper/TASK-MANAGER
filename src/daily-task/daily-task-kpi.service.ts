@@ -417,6 +417,9 @@ export class DailyTaskKpiService implements OnModuleInit {
     const nextStatus: WorkStatus = status === 'doing' ? 'doing' : 'todo';
     const target = await this.assertTarget(targetId);
     const reopened = await this.isReopened(targetId, nik, month);
+    if (reopened && nextStatus === 'todo') {
+      throw new BadRequestException('Belum dikerjakan tidak bisa dipilih setelah pembukaan disetujui');
+    }
     if (this.isPastDue(this.dueLabel(month, target.dueDay, target.dueMonth, target.dueDate)) && !reopened) {
       throw new BadRequestException('Due date target sudah lewat');
     }
