@@ -8,7 +8,9 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { PushService } from '../notifications/push.service';
 import { DropboxStorageService } from '../storage/dropbox.storage.service';
+import { MailService } from '../utils/mail/mail.service';
 import { DailyTaskService } from './daily-task.service';
 import { ANDI_ESCALATION, ANDI_KPIS, ANDI_NIK, KPI_CATEGORIES, KPI_METHODS } from './daily-task.seed';
 
@@ -30,6 +32,14 @@ type KpiInput = {
   targets: TargetInput[];
 };
 
+const WORK_STATUS = {
+  todo: 'Belum dikerjakan',
+  doing: 'Sedang dikerjakan',
+  done: 'Selesai',
+} as const;
+
+type WorkStatus = keyof typeof WORK_STATUS;
+
 const MONTHS: Record<string, number> = {
   jan: 1, feb: 2, mar: 3, apr: 4, mei: 5, may: 5, jun: 6, jul: 7,
   agu: 8, aug: 8, sep: 9, okt: 10, oct: 10, nov: 11, des: 12, dec: 12,
@@ -43,6 +53,8 @@ export class DailyTaskKpiService implements OnModuleInit {
     private readonly prisma: PrismaService,
     private readonly dailyTask: DailyTaskService,
     private readonly storage: DropboxStorageService,
+    private readonly pushService: PushService,
+    private readonly mailService: MailService,
   ) {}
 
   async onModuleInit() {
@@ -82,6 +94,7 @@ export class DailyTaskKpiService implements OnModuleInit {
       roleId: profile.roleId,
       kpiAdmin: profile.kpiAdmin,
       departmentId: profile.departmentId,
+      departmentIds: profile.departmentIds,
     };
   }
 
@@ -142,17 +155,20 @@ export class DailyTaskKpiService implements OnModuleInit {
 
   async sheet(actorNik: string, departmentId: string, nik: string, month: string) {
     this.assertMonth(month);
+    const departmentKey = departmentId.trim();
     const employeeNik = this.assertNik(nik);
     const profile = await this.profile(actorNik);
-    if (profile.roleId === 'STAFF' && (employeeNik !== profile.nik || profile.departmentId !== departmentId)) {
-      throw new ForbiddenException('Karyawan hanya bisa melihat KPI sendiri');
+    const seesAll = profile.roleId === 'SUPER' || profile.roleId === 'ADMIN' || profile.kpiAdmin;
+    if (!seesAll && !profile.departmentIds.includes(departmentKey)) {
+      throw new ForbiddenException('KPI departemen ini tidak bisa dilihat');
     }
-    if (profile.roleId === 'HEAD' && !profile.kpiAdmin && profile.departmentId !== departmentId) {
-      throw new ForbiddenException('HEAD hanya bisa melihat KPI departemen sendiri');
+    const ownSheet = profile.roleId === 'STAFF' && departmentKey === profile.departmentId;
+    if (ownSheet && employeeNik !== profile.nik) {
+      throw new ForbiddenException('Karyawan hanya bisa melihat KPI sendiri');
     }
     await this.ensureSeed();
     const owned = await this.ownsTemplate(employeeNik);
-    const kpis = await this.loadKpis(owned ? null : departmentId, owned ? employeeNik : null, month);
+    const kpis = await this.loadKpis(owned ? null : departmentKey, owned ? employeeNik : null, month);
     const targetIds = kpis.flatMap((kpi) => kpi.targets.map((target) => target.id));
     const entries = targetIds.length
       ? await this.prisma.dT_KPI_ENTRY.findMany({
@@ -167,6 +183,7 @@ export class DailyTaskKpiService implements OnModuleInit {
           realisasi: entry.realisasi,
           submittedAt: entry.submittedAt?.toISOString() ?? null,
           note: entry.note,
+          workStatus: this.workStatusOf(entry.workStatus),
           files: entry.files.map((file) => ({
             id: file.id,
             name: file.filename,
@@ -180,10 +197,10 @@ export class DailyTaskKpiService implements OnModuleInit {
     return {
       kpis,
       entries: byTarget,
-      canSubmitRealisasi: await this.isHeadOf(actorNik, departmentId),
+      canSubmitRealisasi: await this.isHeadOf(actorNik, departmentKey),
       canUploadFiles: actorNik.trim() === employeeNik,
-      canEditKpi: this.mayEditKpi(profile, departmentId),
-      view: profile.roleId === 'STAFF' ? 'staff' : 'full',
+      canEditKpi: this.mayEditKpi(profile, departmentKey),
+      view: ownSheet ? 'staff' : 'full',
     };
   }
 
@@ -360,10 +377,82 @@ export class DailyTaskKpiService implements OnModuleInit {
       });
       return row;
     });
+    const targetText = await this.targetText(targetId);
+    const headName = await this.displayName(actorNik);
+    void this.notifyUsers(
+      [nik],
+      actorNik,
+      'Realisasi KPI',
+      `${headName} mengisi realisasi "${targetText}": ${value}`,
+      this.sheetPath(departmentId, nik),
+      'kpi.realisasi',
+    );
     return {
       realisasi: saved.realisasi,
       submittedAt: saved.submittedAt?.toISOString() ?? null,
     };
+  }
+
+  async setWorkStatus(
+    actorNik: string,
+    departmentId: string,
+    targetId: string,
+    employeeNik: string,
+    month: string,
+    status: string,
+  ) {
+    this.assertMonth(month);
+    const nik = this.assertNik(employeeNik);
+    if (actorNik.trim() !== nik) {
+      throw new ForbiddenException('Hanya karyawan yang bersangkutan yang bisa mengubah status');
+    }
+    if (status !== 'todo' && status !== 'doing') {
+      throw new BadRequestException('Status hanya bisa Belum dikerjakan atau Sedang dikerjakan');
+    }
+    const nextStatus: WorkStatus = status === 'doing' ? 'doing' : 'todo';
+    await this.assertTarget(targetId);
+    const saved = await this.prisma.$transaction(async (tx) => {
+      const before = await tx.dT_KPI_ENTRY.findUnique({
+        where: { targetId_nik_month: { targetId, nik, month } },
+      });
+      if (before?.workStatus === 'done') {
+        throw new BadRequestException('Target yang sudah selesai tidak bisa diubah statusnya');
+      }
+      if ((before?.workStatus ?? 'todo') === nextStatus) return { row: before, changed: false };
+      const row = await tx.dT_KPI_ENTRY.upsert({
+        where: { targetId_nik_month: { targetId, nik, month } },
+        create: { targetId, nik, month, workStatus: nextStatus },
+        update: { workStatus: nextStatus },
+      });
+      await this.writeLog(tx, {
+        actorNik,
+        subjectNik: nik,
+        departmentId,
+        month,
+        entityType: 'entry',
+        entityId: row.id,
+        action: 'status',
+        summary: `Status menjadi ${WORK_STATUS[nextStatus]}`,
+        before,
+        after: row,
+      });
+      return { row, changed: true };
+    });
+    if (saved.changed) {
+      const targetText = await this.targetText(targetId);
+      const name = await this.displayName(nik);
+      const heads = await this.headsOf(departmentId);
+      void this.notifyUsers(
+        heads.map((head) => head.nik),
+        nik,
+        'Status KPI',
+        `${name} mengubah status "${targetText}" menjadi ${WORK_STATUS[nextStatus]}`,
+        this.sheetPath(departmentId, nik),
+        'kpi.status',
+        heads,
+      );
+    }
+    return { workStatus: this.workStatusOf(saved.row?.workStatus) };
   }
 
   async submitFiles(
@@ -382,7 +471,10 @@ export class DailyTaskKpiService implements OnModuleInit {
     }
     const trimmed = note?.trim() ?? '';
     if (!trimmed && files.length === 0) throw new BadRequestException('Isi keterangan atau lampirkan file');
-    await this.assertTarget(targetId);
+    const target = await this.assertTarget(targetId);
+    if (this.isPastDue(this.dueLabel(month, target.dueDay, target.dueMonth, target.dueDate))) {
+      throw new BadRequestException('Due date target sudah lewat');
+    }
     const uploaded: { url: string; filename: string; mimeType: string; bytes: number }[] = [];
     for (const file of files) {
       if (!file?.buffer?.length) continue;
@@ -408,8 +500,8 @@ export class DailyTaskKpiService implements OnModuleInit {
       });
       const entry = await tx.dT_KPI_ENTRY.upsert({
         where: { targetId_nik_month: { targetId, nik, month } },
-        create: { targetId, nik, month, note: trimmed || null },
-        update: trimmed ? { note: trimmed } : {},
+        create: { targetId, nik, month, note: trimmed || null, workStatus: 'done' },
+        update: { ...(trimmed ? { note: trimmed } : {}), workStatus: 'done' },
       });
       if (uploaded.length) {
         await tx.dT_KPI_ENTRY_FILE.createMany({
@@ -434,8 +526,21 @@ export class DailyTaskKpiService implements OnModuleInit {
       });
       return after;
     });
+    const targetText = await this.targetText(targetId);
+    const name = await this.displayName(nik);
+    const heads = await this.headsOf(departmentId);
+    void this.notifyUsers(
+      heads.map((head) => head.nik),
+      nik,
+      'Status KPI',
+      `${name} menyelesaikan target "${targetText}"`,
+      this.sheetPath(departmentId, nik),
+      'kpi.status',
+      heads,
+    );
     return {
       note: saved?.note ?? null,
+      workStatus: 'done' as const,
       files: (saved?.files ?? []).map((file) => ({
         id: file.id,
         name: file.filename,
@@ -610,6 +715,15 @@ export class DailyTaskKpiService implements OnModuleInit {
   private async assertTarget(targetId: string) {
     const target = await this.prisma.dT_KPI_TARGET.findUnique({ where: { id: targetId } });
     if (!target) throw new NotFoundException('Target tidak ditemukan');
+    return target;
+  }
+
+  private isPastDue(label: string | null) {
+    const date = label ? this.parseDate(label) : null;
+    if (!date) return false;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    return date < today;
   }
 
   private async profile(actorNik: string) {
@@ -619,13 +733,31 @@ export class DailyTaskKpiService implements OnModuleInit {
       select: { roleId: true, kpiAdmin: true },
     });
     const departmentId = await this.departmentOf(nik);
+    const extraIds = await this.extraDepartmentsOf(nik);
+    const departmentIds = [...new Set([departmentId, ...extraIds].filter((id): id is string => Boolean(id)))];
     const roleId = user?.roleId ?? 'STAFF';
     return {
       nik,
       roleId,
       kpiAdmin: roleId === 'HEAD' && Boolean(user?.kpiAdmin),
       departmentId,
+      departmentIds,
     };
+  }
+
+  private async extraDepartmentsOf(nik: string) {
+    const rows = await this.prisma.$queryRaw<{ id: string }[]>`
+      SELECT DISTINCT LTRIM(RTRIM(CONVERT(varchar(30), t.DepartemenIDLng))) AS id
+      FROM hris.dbo.SM_DEPT_LIST l
+      INNER JOIN hris.dbo.SM_DEPT_DETAIL d
+        ON LTRIM(RTRIM(d.NIK_SM)) COLLATE DATABASE_DEFAULT = LTRIM(RTRIM(l.NIK)) COLLATE DATABASE_DEFAULT
+      INNER JOIN hris.dbo.tbldepartemen t
+        ON LTRIM(RTRIM(t.KodeDepartemenStr)) COLLATE DATABASE_DEFAULT = LTRIM(RTRIM(d.DEPT)) COLLATE DATABASE_DEFAULT
+      WHERE l.STATUS = 1
+        AND l.NIK IS NOT NULL
+        AND LTRIM(RTRIM(l.NIK)) COLLATE DATABASE_DEFAULT = ${nik.trim()}
+    `;
+    return rows.map((row) => row.id?.trim()).filter((id): id is string => Boolean(id));
   }
 
   private mayEditKpi(profile: { roleId: string; kpiAdmin: boolean; departmentId: string | null }, departmentId: string) {
@@ -661,7 +793,7 @@ export class DailyTaskKpiService implements OnModuleInit {
 
   private async departmentOf(nik: string) {
     const rows = await this.prisma.$queryRaw<{ id: string | null }[]>`
-      SELECT TOP 1 CONVERT(varchar(30), l.DepartemenIDLng) AS id
+      SELECT TOP 1 LTRIM(RTRIM(CONVERT(varchar(30), l.DepartemenIDLng))) AS id
       FROM hris.dbo.tblpegawai t1
       INNER JOIN (
         SELECT
@@ -672,7 +804,7 @@ export class DailyTaskKpiService implements OnModuleInit {
       ) l ON l.PegawaiIDLng = t1.PegawaiIDLng AND l.rn = 1
       WHERE LTRIM(RTRIM(t1.NomorIndukStr)) COLLATE DATABASE_DEFAULT = ${nik.trim()}
     `;
-    return rows[0]?.id ?? null;
+    return rows[0]?.id?.trim() || null;
   }
 
   private progressOf(
@@ -692,6 +824,93 @@ export class DailyTaskKpiService implements OnModuleInit {
       earned += (kpi.weight * finished) / total;
     }
     return { pending, weightPercent: weight === 0 ? 0 : Math.round((earned / weight) * 100) };
+  }
+
+  private workStatusOf(value: string | null | undefined): WorkStatus {
+    return value === 'doing' || value === 'done' ? value : 'todo';
+  }
+
+  private sheetPath(departmentId: string, nik: string) {
+    return `/dashboard/daily-task/${departmentId.trim()}?user=${encodeURIComponent(nik.trim())}`;
+  }
+
+  private async targetText(targetId: string) {
+    const target = await this.prisma.dT_KPI_TARGET.findUnique({
+      where: { id: targetId },
+      select: { text: true },
+    });
+    const text = target?.text?.trim() || 'target';
+    return text.length > 80 ? `${text.slice(0, 77)}...` : text;
+  }
+
+  private async displayName(nik: string) {
+    const user = await this.prisma.dT_USER.findUnique({
+      where: { nik: this.assertNik(nik) },
+      select: { nama: true },
+    });
+    return user?.nama?.trim() || nik;
+  }
+
+  private async headsOf(departmentId: string) {
+    const id = departmentId.trim();
+    if (!/^\d+$/.test(id)) return [];
+    const rows = await this.prisma.$queryRaw<{ nik: string; email: string | null; nama: string | null }[]>`
+      SELECT LTRIM(RTRIM(u.nik)) AS nik,
+             NULLIF(LTRIM(RTRIM(u.email)), '') AS email,
+             u.nama AS nama
+      FROM DT_USER u
+      INNER JOIN hris.dbo.tblpegawai t1
+        ON LTRIM(RTRIM(t1.NomorIndukStr)) COLLATE DATABASE_DEFAULT = LTRIM(RTRIM(u.nik)) COLLATE DATABASE_DEFAULT
+      INNER JOIN (
+        SELECT
+          tj.PegawaiIDLng,
+          tj.DepartemenIDLng,
+          ROW_NUMBER() OVER (PARTITION BY tj.PegawaiIDLng ORDER BY tj.PegawaiJabatanIDLng DESC) AS rn
+        FROM hris.dbo.tblpegawaijabatan tj
+      ) l ON l.PegawaiIDLng = t1.PegawaiIDLng AND l.rn = 1
+      WHERE u.roleId = 'HEAD'
+        AND u.statusActive = 1
+        AND LTRIM(RTRIM(CONVERT(varchar(30), l.DepartemenIDLng))) = ${id}
+    `;
+    return rows.filter((row) => row.nik);
+  }
+
+  private async notifyUsers(
+    niks: string[],
+    actorNik: string,
+    title: string,
+    message: string,
+    path: string,
+    type: 'kpi.status' | 'kpi.realisasi',
+    known?: { nik: string; email: string | null; nama: string | null }[],
+  ) {
+    const actor = actorNik.trim();
+    const targets = [...new Set(niks.map((nik) => nik.trim()).filter((nik) => nik && nik !== actor))];
+    if (targets.length === 0) return;
+    for (const nik of targets) {
+      this.pushService.notifyUser(nik, { type, title, body: message, url: path, tag: `${type}:${nik}` });
+    }
+    const people = known
+      ? known
+      : (await this.prisma.dT_USER.findMany({
+          where: { nik: { in: targets } },
+          select: { nik: true, email: true, nama: true },
+        })).map((row) => ({ nik: row.nik.trim(), email: row.email, nama: row.nama }));
+    for (const person of people) {
+      const email = person.email?.trim();
+      if (!email || !targets.includes(person.nik.trim())) continue;
+      try {
+        await this.mailService.sendDailyTaskNotice({
+          to: email,
+          name: person.nama?.trim() || person.nik,
+          title,
+          message,
+          path,
+        });
+      } catch (error) {
+        this.logger.warn(`Email KPI ke ${person.nik} gagal: ${(error as Error).message}`);
+      }
+    }
   }
 
   private async writeLog(

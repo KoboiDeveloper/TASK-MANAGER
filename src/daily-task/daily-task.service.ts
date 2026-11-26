@@ -31,7 +31,7 @@ export class DailyTaskService {
         FROM hris.dbo.tblpegawaijabatan tj
       )
       SELECT
-        CONVERT(varchar(30), d.DepartemenIDLng) AS id,
+        LTRIM(RTRIM(CONVERT(varchar(30), d.DepartemenIDLng))) AS id,
         LTRIM(RTRIM(d.DepartemenStr)) AS name
       FROM hris.dbo.tbldepartemen d
       WHERE d.DepartemenStr IS NOT NULL
@@ -48,7 +48,9 @@ export class DailyTaskService {
         )
       ORDER BY d.DepartemenStr ASC
     `;
-    return rows;
+    return rows
+      .map((row) => ({ ...row, id: row.id?.trim() ?? '' }))
+      .filter((row) => row.id);
   }
 
   async employees(departmentId: string): Promise<HrisEmployee[]> {
@@ -81,7 +83,7 @@ export class DailyTaskService {
         WHERE LTRIM(RTRIM(ph.NIK)) COLLATE DATABASE_DEFAULT = LTRIM(RTRIM(t1.NomorIndukStr)) COLLATE DATABASE_DEFAULT
           AND LTRIM(RTRIM(ISNULL(ph.Photo, ''))) <> ''
       ) ss
-      WHERE CONVERT(varchar(30), l.DepartemenIDLng) = ${departmentId}
+      WHERE LTRIM(RTRIM(CONVERT(varchar(30), l.DepartemenIDLng))) = ${departmentId.trim()}
         AND ISNULL(t1.PegawaiNonAktifInt, 0) = 0
         AND t1.NomorIndukStr IS NOT NULL
         AND t1.NamaLengkapStr IS NOT NULL

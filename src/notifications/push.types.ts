@@ -37,6 +37,8 @@ export const PUSH_TYPE_CATEGORY: Record<string, PushCategory> = {
   'project.completed': 'pushTask',
   'task.attachment': 'pushTask',
   'task.removed': 'pushTask',
+  'kpi.status': 'pushTask',
+  'kpi.realisasi': 'pushTask',
 
   'project.member_added': 'pushProject',
   'project.role_changed': 'pushProject',

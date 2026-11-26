@@ -155,6 +155,27 @@ export class DailyTaskController {
     }
   }
 
+  @Post('targets/:targetId/status')
+  async status(
+    @Req() request: AuthRequest,
+    @Param('targetId') targetId: string,
+    @Body() body: { departmentId: string; nik: string; month: string; status: string },
+  ) {
+    try {
+      const data = await this.kpiService.setWorkStatus(
+        this.actor(request),
+        body.departmentId,
+        targetId,
+        body.nik,
+        body.month,
+        body.status,
+      );
+      return new CommonResponse('Status disimpan', HttpStatus.OK, data);
+    } catch (error) {
+      return handleException(error);
+    }
+  }
+
   @Post('targets/:targetId/realisasi')
   async realisasi(
     @Req() request: AuthRequest,

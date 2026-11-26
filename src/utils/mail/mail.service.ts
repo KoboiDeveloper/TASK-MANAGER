@@ -1066,5 +1066,41 @@ export class MailService implements OnModuleInit {
       this.logger.warn(`sendProjectCompletedEmail failed: ${e}`);
     }
   }
+
+  async sendDailyTaskNotice(params: {
+    to: string;
+    name: string;
+    title: string;
+    message: string;
+    path: string;
+  }): Promise<void> {
+    const to = params.to?.trim();
+    if (!to) return;
+    const base = this.domain || 'http://localhost:3000';
+    const path = params.path.startsWith('/') ? params.path : `/${params.path}`;
+    const href = `${base.replace(/\/$/, '')}${path}`;
+    const title = this.esc(params.title);
+    const name = this.esc(params.name);
+    const message = this.esc(params.message);
+    const html = `
+  <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden; background-color: #ffffff;">
+    <div style="background-color: #082988; padding: 20px; color: white;">
+      <h2 style="margin: 0; font-size: 18px;">${title}</h2>
+    </div>
+    <div style="padding: 24px 20px;">
+      <p style="font-size: 15px; color: #334155; margin-top: 0;">Halo ${name},</p>
+      <p style="font-size: 14px; color: #334155; line-height: 1.5;">${message}</p>
+      <p style="margin: 24px 0 0;">
+        <a href="${this.esc(href)}" style="display: inline-block; background: #082988; color: #ffffff; text-decoration: none; padding: 10px 16px; border-radius: 8px; font-size: 14px; font-weight: 700;">Buka Daily Task</a>
+      </p>
+    </div>
+  </div>`;
+    await this.deliver({
+      to,
+      subject: params.title,
+      html,
+      text: `${params.message}\n${href}`,
+    });
+  }
 }
 
